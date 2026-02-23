@@ -1,5 +1,6 @@
 # collect_tse.R
-# Download and filter campaign finance spending on fuel/gas stations (TSE)
+# Download and filter campaign finance data related to fuel/gas stations (TSE)
+# Extracts both expenditures (despesas) and donation receipts (receitas)
 # Source: https://dadosabertos.tse.jus.br/dataset/prestacao-de-contas-eleitorais
 
 library(data.table)
@@ -129,6 +130,66 @@ for (year in YEARS) {
     }
   } else {
     cat("  ", year, ": no fuel records found\n")
+  }
+
+  # --- Extract donation receipts (receitas) ---
+  # Receitas are in the same zip; filter for donors that are gas stations
+  receipt_files <- csv_files[grepl("receita", csv_files, ignore.case = TRUE)]
+  # Exclude doador_originario (traced-back donors) to avoid double-counting
+  receipt_files <- receipt_files[!grepl("doador_originario", receipt_files, ignore.case = TRUE)]
+
+  all_receipts <- list()
+
+  for (csv_file in receipt_files) {
+    cat("  Reading receipts:", basename(csv_file), "...\n")
+    tryCatch({
+      dt <- fread(csv_file, sep = ";", encoding = "Latin-1")
+
+      setnames(dt, iconv(names(dt), from = "latin1", to = "UTF-8"))
+      chr_cols <- names(dt)[vapply(dt, is.character, logical(1))]
+      for (col in chr_cols) {
+        set(dt, j = col, value = iconv(dt[[col]], from = "latin1", to = "UTF-8"))
+      }
+
+      # Find donor name column
+      donor_col <- grep("^NM_DOADOR$|^Nome do doador$",
+                        names(dt), ignore.case = TRUE, value = TRUE)
+      if (length(donor_col) == 0) {
+        cat("    No donor column found in", basename(csv_file), "\n")
+        next
+      }
+
+      fuel_donors <- dt[grepl(FUEL_PATTERN, get(donor_col[1]), ignore.case = TRUE)]
+
+      if (nrow(fuel_donors) > 0) {
+        # Coerce all columns to character to avoid type conflicts across files
+        for (col in names(fuel_donors)) {
+          set(fuel_donors, j = col, value = as.character(fuel_donors[[col]]))
+        }
+        all_receipts <- c(all_receipts, list(fuel_donors))
+      }
+    }, error = function(e) {
+      cat("    FAILED:", basename(csv_file), "-", conditionMessage(e), "\n")
+    })
+  }
+
+  if (length(all_receipts) > 0) {
+    all_receipts <- rbindlist(all_receipts, fill = TRUE)
+    out_file <- file.path(FILTERED_DIR, paste0("tse_receitas_combustivel_", year, ".csv"))
+    fwrite(all_receipts, out_file)
+
+    val_col <- grep("valor|VR_RECEITA|vr_receita", names(all_receipts),
+                    ignore.case = TRUE, value = TRUE)
+    if (length(val_col) > 0) {
+      total <- all_receipts[, sum(as.numeric(gsub("[^0-9,.-]", "", gsub(",", ".",
+                   get(val_col[1])))), na.rm = TRUE)]
+      cat("   Receipts", year, ":", nrow(all_receipts), "fuel donor records, R$",
+          format(total, big.mark = ".", decimal.mark = ","), "\n")
+    } else {
+      cat("   Receipts", year, ":", nrow(all_receipts), "fuel donor records\n")
+    }
+  } else {
+    cat("   Receipts", year, ": no fuel donor records found\n")
   }
 }
 

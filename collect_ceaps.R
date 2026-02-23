@@ -43,7 +43,8 @@ for (year in YEARS) {
 
   cat("  Reading", csv_file, "...\n")
   tryCatch({
-    dt <- fread(csv_file, sep = ";", encoding = "Latin-1", fill = TRUE)
+    # Skip the first line ("ULTIMA ATUALIZACAO") — actual headers are on line 2
+    dt <- fread(csv_file, sep = ";", encoding = "Latin-1", fill = TRUE, skip = 1)
 
     # Ensure character columns are properly encoded as UTF-8
     setnames(dt, iconv(names(dt), from = "latin1", to = "UTF-8"))
