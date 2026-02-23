@@ -122,20 +122,65 @@ cat("  ", nrow(ceaps), "CEAPS records\n")
 
 # --- 1d. TSE Expenditures ---
 cat("Loading TSE expenditures...\n")
+
+# Helper: read TSE expenditure file, normalizing old/new column names
+read_tse_exp <- function(f) {
+  dt <- fread(f, colClasses = "character")
+  cols <- names(dt)
+  if ("AA_ELEICAO" %in% cols) {
+    # New format (2018+): select standard columns
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_FORNECEDOR",
+                        "NM_FORNECEDOR", "CD_CNAE_FORNECEDOR",
+                        "NM_MUNICIPIO_FORNECEDOR", "SG_UF_FORNECEDOR",
+                        "DT_DESPESA", "VR_DESPESA_CONTRATADA"), cols)
+    dt <- dt[, ..keep]
+  } else {
+    # Old format (2014-2016): map Portuguese column names
+    # Extract year from filename (e.g., tse_combustivel_2014.csv)
+    yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
+    rename_map <- c(
+      "Desc. Eleição" = "DS_ELEICAO",
+      "UF" = "SG_UF",
+      "CPF do candidato" = "NR_CPF_CANDIDATO",
+      "Nome candidato" = "NM_CANDIDATO",
+      "Sequencial Candidato" = "SQ_CANDIDATO",
+      "Numero candidato" = "NR_CANDIDATO",
+      "Cargo" = "DS_CARGO",
+      "CPF/CNPJ do fornecedor" = "NR_CPF_CNPJ_FORNECEDOR",
+      "Nome do fornecedor" = "NM_FORNECEDOR",
+      "Cod setor econômico do fornecedor" = "CD_CNAE_FORNECEDOR",
+      "Nome do município do fornecedor" = "NM_MUNICIPIO_FORNECEDOR",
+      "UF do fornecedor" = "SG_UF_FORNECEDOR",
+      "Data da despesa" = "DT_DESPESA",
+      "Valor despesa" = "VR_DESPESA_CONTRATADA"
+    )
+    # Also try Sigla Partido variants
+    partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
+    if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
+
+    for (old_name in names(rename_map)) {
+      if (old_name %in% cols) {
+        setnames(dt, old_name, rename_map[old_name])
+      }
+    }
+    dt[, AA_ELEICAO := yr]
+    # Keep only standard columns that exist
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_FORNECEDOR",
+                        "NM_FORNECEDOR", "CD_CNAE_FORNECEDOR",
+                        "NM_MUNICIPIO_FORNECEDOR", "SG_UF_FORNECEDOR",
+                        "DT_DESPESA", "VR_DESPESA_CONTRATADA"), names(dt))
+    dt <- dt[, ..keep]
+  }
+  dt
+}
+
 tse_exp_files <- list.files("data/filtered/tse", pattern = "^tse_combustivel_",
                              full.names = TRUE)
-tse_exp_list <- lapply(tse_exp_files, function(f) {
-  dt <- fread(f, select = c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
-                             "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
-                             "DS_CARGO", "NR_CPF_CNPJ_FORNECEDOR",
-                             "NM_FORNECEDOR", "CD_CNAE_FORNECEDOR",
-                             "NM_MUNICIPIO_FORNECEDOR", "SG_UF_FORNECEDOR",
-                             "DT_DESPESA", "VR_DESPESA_CONTRATADA"),
-              colClasses = list(character = c("NR_CPF_CANDIDATO", "SQ_CANDIDATO",
-                                              "NR_CPF_CNPJ_FORNECEDOR",
-                                              "CD_CNAE_FORNECEDOR")))
-  dt
-})
+tse_exp_list <- lapply(tse_exp_files, read_tse_exp)
 tse_exp <- rbindlist(tse_exp_list, fill = TRUE)
 tse_exp[, politician_cpf := clean_cpf(NR_CPF_CANDIDATO)]
 tse_exp[, supplier_cnpj := clean_cnpj(NR_CPF_CNPJ_FORNECEDOR)]
@@ -144,20 +189,55 @@ cat("  ", nrow(tse_exp), "TSE expenditure records\n")
 
 # --- 1e. TSE Receipts (donations from gas stations) ---
 cat("Loading TSE receipts...\n")
+
+# Helper: read TSE receipt file, normalizing old/new column names
+read_tse_rec <- function(f) {
+  dt <- fread(f, colClasses = "character")
+  cols <- names(dt)
+  if ("AA_ELEICAO" %in% cols) {
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_DOADOR",
+                        "NM_DOADOR", "CD_CNAE_DOADOR",
+                        "NM_MUNICIPIO_DOADOR", "SG_UF_DOADOR",
+                        "DT_RECEITA", "VR_RECEITA"), cols)
+    dt <- dt[, ..keep]
+  } else {
+    yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
+    rename_map <- c(
+      "UF" = "SG_UF",
+      "CPF do candidato" = "NR_CPF_CANDIDATO",
+      "Nome candidato" = "NM_CANDIDATO",
+      "Sequencial Candidato" = "SQ_CANDIDATO",
+      "Cargo" = "DS_CARGO",
+      "CPF/CNPJ do doador" = "NR_CPF_CNPJ_DOADOR",
+      "Nome do doador" = "NM_DOADOR",
+      "Cod setor econômico do doador" = "CD_CNAE_DOADOR",
+      "Data da receita" = "DT_RECEITA",
+      "Valor receita" = "VR_RECEITA"
+    )
+    partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
+    if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
+
+    for (old_name in names(rename_map)) {
+      if (old_name %in% cols) {
+        setnames(dt, old_name, rename_map[old_name])
+      }
+    }
+    dt[, AA_ELEICAO := yr]
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_DOADOR",
+                        "NM_DOADOR", "CD_CNAE_DOADOR",
+                        "DT_RECEITA", "VR_RECEITA"), names(dt))
+    dt <- dt[, ..keep]
+  }
+  dt
+}
+
 tse_rec_files <- list.files("data/filtered/tse", pattern = "^tse_receitas_",
                              full.names = TRUE)
-tse_rec_list <- lapply(tse_rec_files, function(f) {
-  dt <- fread(f, select = c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
-                             "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
-                             "DS_CARGO", "NR_CPF_CNPJ_DOADOR",
-                             "NM_DOADOR", "CD_CNAE_DOADOR",
-                             "NM_MUNICIPIO_DOADOR", "SG_UF_DOADOR",
-                             "DT_RECEITA", "VR_RECEITA"),
-              colClasses = list(character = c("NR_CPF_CANDIDATO", "SQ_CANDIDATO",
-                                              "NR_CPF_CNPJ_DOADOR",
-                                              "CD_CNAE_DOADOR")))
-  dt
-})
+tse_rec_list <- lapply(tse_rec_files, read_tse_rec)
 tse_rec <- rbindlist(tse_rec_list, fill = TRUE)
 tse_rec[, politician_cpf := clean_cpf(NR_CPF_CANDIDATO)]
 tse_rec[, donor_cnpj := clean_cnpj(NR_CPF_CNPJ_DOADOR)]
