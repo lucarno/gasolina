@@ -33,9 +33,9 @@ for (year in YEARS) {
 
   cat("  Reading", csv_files[1], "...\n")
   tryCatch({
-    dt <- fread(csv_files[1], sep = ";", encoding = "Latin-1")
+    dt <- fread(csv_files[1], sep = ";", encoding = "UTF-8")
 
-    fuel <- dt[grepl("COMBUST", txtdescricao, ignore.case = TRUE)]
+    fuel <- dt[grepl("COMBUST", txtDescricao, ignore.case = TRUE)]
 
     out_file <- file.path(FILTERED_DIR, paste0("ceap_combustivel_", year, ".csv"))
     fwrite(fuel, out_file)
