@@ -2,6 +2,8 @@
 # Download and filter federal senators' spending on fuel (CEAPS - Senado Federal)
 # Source: https://www12.senado.leg.br/transparencia/dados-abertos-transparencia/dados-abertos-ceaps
 
+library(data.table)
+
 RAW_DIR <- "data/raw/ceaps"
 FILTERED_DIR <- "data/filtered/ceaps"
 
@@ -32,33 +34,32 @@ for (year in YEARS) {
 
   cat("  Reading", csv_file, "...\n")
   tryCatch({
-    df <- read.csv(csv_file, sep = ";", fileEncoding = "latin1",
-                   stringsAsFactors = FALSE, quote = "\"")
+    dt <- fread(csv_file, sep = ";", encoding = "Latin-1", fill = TRUE)
 
     # Find the expense type column (varies: TIPO_DESPESA, tipo_despesa, etc.)
-    type_col <- grep("tipo.*despesa|despesa.*tipo|TIPO", names(df),
+    type_col <- grep("tipo.*despesa|despesa.*tipo|TIPO", names(dt),
                      ignore.case = TRUE, value = TRUE)
     if (length(type_col) == 0) {
       # Try broader search on all columns for fuel keywords
       cat("  No expense type column found, searching all text columns...\n")
-      text_cols <- names(df)[sapply(df, is.character)]
-      fuel_mask <- rep(FALSE, nrow(df))
+      text_cols <- names(dt)[sapply(dt, is.character)]
+      fuel_mask <- rep(FALSE, nrow(dt))
       for (col in text_cols) {
-        fuel_mask <- fuel_mask | grepl("combust", df[[col]], ignore.case = TRUE)
+        fuel_mask <- fuel_mask | grepl("combust", dt[[col]], ignore.case = TRUE)
       }
-      fuel <- df[fuel_mask, ]
+      fuel <- dt[fuel_mask]
     } else {
-      fuel <- df[grepl("combust", df[[type_col[1]]], ignore.case = TRUE), ]
+      fuel <- dt[grepl("combust", get(type_col[1]), ignore.case = TRUE)]
     }
 
     out_file <- file.path(FILTERED_DIR, paste0("ceaps_combustivel_", year, ".csv"))
-    write.csv(fuel, out_file, row.names = FALSE, fileEncoding = "UTF-8")
+    fwrite(fuel, out_file)
 
     # Try to find the amount column
     val_col <- grep("valor|vlr|vl_", names(fuel), ignore.case = TRUE, value = TRUE)
     if (length(val_col) > 0) {
-      total <- sum(as.numeric(gsub("[^0-9,.-]", "", gsub(",", ".",
-                   fuel[[val_col[1]]]))), na.rm = TRUE)
+      total <- fuel[, sum(as.numeric(gsub("[^0-9,.-]", "", gsub(",", ".",
+                   get(val_col[1])))), na.rm = TRUE)]
       cat("  ", year, ":", nrow(fuel), "fuel records, R$",
           format(total, big.mark = ".", decimal.mark = ","), "\n")
     } else {

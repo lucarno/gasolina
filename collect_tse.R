@@ -2,6 +2,8 @@
 # Download and filter campaign finance spending on fuel/gas stations (TSE)
 # Source: https://dadosabertos.tse.jus.br/dataset/prestacao-de-contas-eleitorais
 
+library(data.table)
+
 RAW_DIR <- "data/raw/tse"
 FILTERED_DIR <- "data/filtered/tse"
 
@@ -56,42 +58,42 @@ for (year in YEARS) {
   expense_files <- csv_files[grepl("despesa", csv_files, ignore.case = TRUE)]
   if (length(expense_files) == 0) expense_files <- csv_files
 
-  all_fuel <- data.frame()
+  all_fuel <- list()
 
   for (csv_file in expense_files) {
     cat("  Reading", basename(csv_file), "...\n")
     tryCatch({
-      df <- read.csv(csv_file, sep = ";", fileEncoding = "latin1",
-                     stringsAsFactors = FALSE, quote = "\"")
+      dt <- fread(csv_file, sep = ";", encoding = "Latin-1")
 
       # Find supplier name column
       supplier_col <- grep("fornecedor|NM_FORNECEDOR|nm_fornecedor",
-                          names(df), ignore.case = TRUE, value = TRUE)
+                          names(dt), ignore.case = TRUE, value = TRUE)
       if (length(supplier_col) == 0) {
         cat("    No supplier column found in", basename(csv_file), "\n")
         next
       }
 
-      fuel <- df[grepl(FUEL_PATTERN, df[[supplier_col[1]]], ignore.case = TRUE), ]
+      fuel <- dt[grepl(FUEL_PATTERN, get(supplier_col[1]), ignore.case = TRUE)]
 
       if (nrow(fuel) > 0) {
-        all_fuel <- rbind(all_fuel, fuel)
+        all_fuel <- c(all_fuel, list(fuel))
       }
     }, error = function(e) {
       cat("    FAILED to process", basename(csv_file), ":", conditionMessage(e), "\n")
     })
   }
 
-  if (nrow(all_fuel) > 0) {
+  if (length(all_fuel) > 0) {
+    all_fuel <- rbindlist(all_fuel, fill = TRUE)
     out_file <- file.path(FILTERED_DIR, paste0("tse_combustivel_", year, ".csv"))
-    write.csv(all_fuel, out_file, row.names = FALSE, fileEncoding = "UTF-8")
+    fwrite(all_fuel, out_file)
 
     # Try to find the amount column
     val_col <- grep("valor|VR_DESPESA|vr_despesa", names(all_fuel),
                     ignore.case = TRUE, value = TRUE)
     if (length(val_col) > 0) {
-      total <- sum(as.numeric(gsub("[^0-9,.-]", "", gsub(",", ".",
-                   all_fuel[[val_col[1]]]))), na.rm = TRUE)
+      total <- all_fuel[, sum(as.numeric(gsub("[^0-9,.-]", "", gsub(",", ".",
+                   get(val_col[1])))), na.rm = TRUE)]
       cat("  ", year, ":", nrow(all_fuel), "fuel records, R$",
           format(total, big.mark = ".", decimal.mark = ","), "\n")
     } else {

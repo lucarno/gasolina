@@ -2,6 +2,8 @@
 # Download and filter state deputies' spending on fuel from Assembleias Legislativas
 # Covers all 27 Brazilian federative units, tiered by data accessibility
 
+library(data.table)
+
 RAW_DIR <- "data/raw/states"
 FILTERED_DIR <- "data/filtered/states"
 
@@ -26,13 +28,12 @@ safe_download <- function(url, dest) {
 
 # Helper: read CSV with multiple encoding/separator attempts
 safe_read_csv <- function(path, seps = c(";", ",", "|", "\t"),
-                          encodings = c("latin1", "UTF-8")) {
+                          encodings = c("Latin-1", "UTF-8")) {
   for (enc in encodings) {
     for (sep in seps) {
       result <- tryCatch({
-        df <- read.csv(path, sep = sep, fileEncoding = enc,
-                       stringsAsFactors = FALSE, quote = "\"")
-        if (ncol(df) > 1) return(df)
+        dt <- fread(path, sep = sep, encoding = enc)
+        if (ncol(dt) > 1) return(dt)
         NULL
       }, error = function(e) NULL)
       if (!is.null(result)) return(result)
@@ -41,35 +42,35 @@ safe_read_csv <- function(path, seps = c(";", ",", "|", "\t"),
   NULL
 }
 
-# Helper: filter a dataframe for fuel-related rows
-filter_fuel <- function(df) {
+# Helper: filter a data.table for fuel-related rows
+filter_fuel <- function(dt) {
   # First try to find an expense type/category column
   type_col <- grep("tipo.*despesa|descricao.*despesa|categoria|natureza|rubrica|subelem",
-                   names(df), ignore.case = TRUE, value = TRUE)
+                   names(dt), ignore.case = TRUE, value = TRUE)
 
   if (length(type_col) > 0) {
-    mask <- grepl(FUEL_PATTERN, df[[type_col[1]]], ignore.case = TRUE)
-    if (sum(mask) > 0) return(df[mask, ])
+    mask <- grepl(FUEL_PATTERN, dt[[type_col[1]]], ignore.case = TRUE)
+    if (sum(mask) > 0) return(dt[mask])
   }
 
   # Fall back: search all text columns for fuel keywords
-  text_cols <- names(df)[sapply(df, is.character)]
-  mask <- rep(FALSE, nrow(df))
+  text_cols <- names(dt)[sapply(dt, is.character)]
+  mask <- rep(FALSE, nrow(dt))
   for (col in text_cols) {
-    mask <- mask | grepl(FUEL_PATTERN, df[[col]], ignore.case = TRUE)
+    mask <- mask | grepl(FUEL_PATTERN, dt[[col]], ignore.case = TRUE)
   }
-  df[mask, ]
+  dt[mask]
 }
 
 # Helper: process and save filtered data for a state
-save_state <- function(df, uf, label = "") {
-  fuel <- filter_fuel(df)
+save_state <- function(dt, uf, label = "") {
+  fuel <- filter_fuel(dt)
   state_dir <- file.path(FILTERED_DIR, uf)
   dir.create(state_dir, recursive = TRUE, showWarnings = FALSE)
 
   suffix <- if (nchar(label) > 0) paste0("_", label) else ""
   out_file <- file.path(state_dir, paste0(tolower(uf), "_combustivel", suffix, ".csv"))
-  write.csv(fuel, out_file, row.names = FALSE, fileEncoding = "UTF-8")
+  fwrite(fuel, out_file)
   cat("    ", uf, label, ":", nrow(fuel), "fuel records\n")
   nrow(fuel)
 }
@@ -132,7 +133,6 @@ for (year in 2019:2025) {
         if (is.data.frame(json_data) || is.list(json_data)) {
           # Flatten if needed
           if (!is.data.frame(json_data)) {
-            # Look for the data frame inside the JSON structure
             for (name in names(json_data)) {
               if (is.data.frame(json_data[[name]])) {
                 json_data <- json_data[[name]]
@@ -141,7 +141,7 @@ for (year in 2019:2025) {
             }
           }
           if (is.data.frame(json_data) && nrow(json_data) > 0) {
-            save_state(json_data, "MG", paste0(year, "_", sprintf("%02d", month)))
+            save_state(as.data.table(json_data), "MG", paste0(year, "_", sprintf("%02d", month)))
           }
         }
       }, error = function(e) {

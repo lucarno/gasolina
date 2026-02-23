@@ -2,6 +2,8 @@
 # Download and filter federal deputies' spending on fuel (CEAP - Câmara dos Deputados)
 # Source: https://www2.camara.leg.br/transparencia/cota-para-exercicio-da-atividade-parlamentar
 
+library(data.table)
+
 YEARS <- 2008:2025
 RAW_DIR <- "data/raw/ceap"
 FILTERED_DIR <- "data/filtered/ceap"
@@ -31,15 +33,14 @@ for (year in YEARS) {
 
   cat("  Reading", csv_files[1], "...\n")
   tryCatch({
-    df <- read.csv(csv_files[1], sep = ";", fileEncoding = "latin1",
-                   stringsAsFactors = FALSE, quote = "\"")
+    dt <- fread(csv_files[1], sep = ";", encoding = "Latin-1")
 
-    fuel <- df[grepl("COMBUST", df$txtdescricao, ignore.case = TRUE), ]
+    fuel <- dt[grepl("COMBUST", txtdescricao, ignore.case = TRUE)]
 
     out_file <- file.path(FILTERED_DIR, paste0("ceap_combustivel_", year, ".csv"))
-    write.csv(fuel, out_file, row.names = FALSE, fileEncoding = "UTF-8")
+    fwrite(fuel, out_file)
 
-    total <- sum(as.numeric(gsub(",", ".", fuel$vlrLiquido)), na.rm = TRUE)
+    total <- fuel[, sum(as.numeric(gsub(",", ".", vlrLiquido)), na.rm = TRUE)]
     cat("  ", year, ":", nrow(fuel), "fuel records, R$",
         format(total, big.mark = ".", decimal.mark = ","), "\n")
   }, error = function(e) {
