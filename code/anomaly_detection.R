@@ -326,6 +326,7 @@ pol_scores <- merge(pol_scores, max_z, by.x = "cpf", by.y = "politician_cpf", al
 
 # Add flag counts
 self_dealing <- tryCatch(fread("data/linked/flag_self_dealing.csv", colClasses = "character"), error = function(e) data.table())
+second_deg_dealing <- tryCatch(fread("data/linked/flag_second_degree_dealing.csv", colClasses = "character"), error = function(e) data.table())
 round_trip <- tryCatch(fread("data/linked/flag_round_trip.csv", colClasses = "character"), error = function(e) data.table())
 
 if (nrow(self_dealing) > 0) {
@@ -333,6 +334,13 @@ if (nrow(self_dealing) > 0) {
   pol_scores <- merge(pol_scores, sd_count, by.x = "cpf", by.y = "politician_cpf", all.x = TRUE)
 } else {
   pol_scores[, n_self_dealing := 0L]
+}
+
+if (nrow(second_deg_dealing) > 0) {
+  sd2_count <- second_deg_dealing[, .(n_second_degree = .N), by = politician_cpf]
+  pol_scores <- merge(pol_scores, sd2_count, by.x = "cpf", by.y = "politician_cpf", all.x = TRUE)
+} else {
+  pol_scores[, n_second_degree := 0L]
 }
 
 if (nrow(round_trip) > 0) {
@@ -346,7 +354,7 @@ if (nrow(round_trip) > 0) {
 setnafill(pol_scores, fill = 0,
           cols = c("max_hhi", "mean_hhi", "years_high_hhi", "max_spending",
                    "benford_mad", "pct_round_1000", "pct_round_100",
-                   "max_z_score", "n_self_dealing", "n_round_trip"))
+                   "max_z_score", "n_self_dealing", "n_second_degree", "n_round_trip"))
 pol_scores[is.na(n_txns), n_txns := 0L]
 pol_scores[is.na(benford_p), benford_p := 1]
 
@@ -368,16 +376,18 @@ scored[, `:=`(
   score_round = normalize01(pct_round_1000),
   score_outlier = normalize01(pmin(max_z_score, 10)),  # cap at 10
   score_self_dealing = fifelse(n_self_dealing > 0, 1, 0),
+  score_second_degree = fifelse(n_second_degree > 0, 0.6, 0),  # less weight than direct
   score_round_trip = fifelse(n_round_trip > 0, 1, 0)
 )]
 
-# Weighted composite
+# Weighted composite (self-dealing includes both direct and second-degree)
 scored[, anomaly_score := (
-  0.20 * score_hhi +
+  0.15 * score_hhi +
   0.15 * score_benford +
   0.10 * score_round +
   0.15 * score_outlier +
-  0.25 * score_self_dealing +
+  0.20 * score_self_dealing +
+  0.10 * score_second_degree +
   0.15 * score_round_trip
 )]
 
@@ -398,7 +408,7 @@ print(scored[1:20, .(nome, cargos, anomaly_score = round(anomaly_score, 3),
                       benford_mad = round(benford_mad, 4),
                       pct_round_1000 = round(pct_round_1000, 2),
                       max_z_score = round(max_z_score, 1),
-                      n_self_dealing, n_round_trip,
+                      n_self_dealing, n_second_degree, n_round_trip,
                       max_spending = round(max_spending))])
 
 # ============================================================

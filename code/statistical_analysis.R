@@ -92,9 +92,16 @@ panel <- spending[!is.na(politician_cpf), .(
   }
 ), by = .(politician_cpf, year)]
 
-# Add ownership indicator
+# Add ownership indicators
 owner_cpfs <- unique(ownership$politician_cpf)
 panel[, owns_station := politician_cpf %in% owner_cpfs]
+
+# Second-degree: politician's business associate owns a gas station
+second_deg <- connections[type == "second_degree_ownership"]
+second_deg_cpfs <- unique(second_deg$politician_cpf)
+panel[, second_degree_connected := politician_cpf %in% second_deg_cpfs]
+# Combined: any ownership connection (direct or second-degree)
+panel[, any_ownership := owns_station | second_degree_connected]
 
 # Add politician characteristics
 panel <- merge(panel, politicians[, .(cpf, cargos, partidos, nome)],
@@ -159,9 +166,19 @@ m5 <- feols(n_stations ~ owns_station + i(year_f) + i(office), data = panel)
 cat("owns_station coef:", round(coef(m5)["owns_stationTRUE"], 3),
     "se:", round(se(m5)["owns_stationTRUE"], 3), "\n")
 
+# Regression 6: Second-degree ownership
+cat("--- Model 6: Second-degree ownership ---\n")
+m6 <- feols(log_spending ~ owns_station + second_degree_connected + i(year_f) + i(office),
+            data = panel)
+cat("owns_station coef:", round(coef(m6)["owns_stationTRUE"], 3),
+    "se:", round(se(m6)["owns_stationTRUE"], 3), "\n")
+cat("second_degree coef:", round(coef(m6)["second_degree_connectedTRUE"], 3),
+    "se:", round(se(m6)["second_degree_connectedTRUE"], 3), "\n")
+
 # Save regression table
 models <- list("(1) Log Spending" = m1, "(2) + Office FE" = m2,
-               "(3) Politician FE" = m3, "(4) HHI" = m4, "(5) N Stations" = m5)
+               "(3) Politician FE" = m3, "(4) HHI" = m4,
+               "(5) N Stations" = m5, "(6) 2nd Degree" = m6)
 
 tryCatch({
   msummary(models, output = file.path(TABLE_DIR, "panel_regressions.tex"),

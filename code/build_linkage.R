@@ -605,16 +605,27 @@ conn_states <- states_all[!is.na(supplier_cnpj), .(
 conn_states[is.na(politician_cpf) & !is.na(politician_name),
             politician_cpf := politicians$cpf[match(politician_name, politicians$nome_clean)]]
 
-# --- 4f. Ownership connections ---
+# --- 4f. Ownership connections (CPF-based matching) ---
 cat("  Processing ownership connections...\n")
 
-# Match QSA partner names to politician names
-# This is the key linkage: does a politician (or someone with same name) own a gas station?
-pol_names <- politicians[, .(cpf, nome_clean)]
-setkey(pol_names, nome_clean)
+# Match using partial CPF: QSA masks CPFs as ***XXXXXX** (middle 6 visible)
+# Politicians have full 11-digit CPFs; extract middle 6 = chars 4-9
+# Match on BOTH middle-6 AND cleaned name for high confidence
 
-owner_pol <- gas_socios[!is.na(socio_name) & !is.na(cnpj_clean)]
-owner_pol <- merge(owner_pol, pol_names, by.x = "socio_name", by.y = "nome_clean",
+# Prepare QSA gas station partners with middle-6 CPF
+gas_pf <- gas_socios[codigo_tipo_socio == 2 & !is.na(cnpj_clean)]  # Pessoa Fisica only
+gas_pf[, middle6 := gsub("[*]", "", cpf_cnpj_socio)]
+gas_pf <- gas_pf[nchar(middle6) == 6]  # valid masked CPFs only
+
+# Prepare politicians with middle-6
+pol_cpf <- politicians[!is.na(cpf) & nchar(cpf) == 11, .(cpf, nome_clean)]
+pol_cpf[, middle6 := substr(cpf, 4, 9)]
+
+# Direct ownership: politician IS a gas station partner (middle6 + name match)
+owner_pol <- merge(gas_pf[, .(cnpj_clean, socio_name, middle6, year_start)],
+                   pol_cpf,
+                   by.x = c("middle6", "socio_name"),
+                   by.y = c("middle6", "nome_clean"),
                    allow.cartesian = TRUE)
 
 if (nrow(owner_pol) > 0) {
@@ -627,20 +638,100 @@ if (nrow(owner_pol) > 0) {
     valor = NA_real_,
     source = "qsa"
   )]
-  cat("    Found", nrow(conn_ownership), "ownership connections\n")
+  cat("    Direct ownership (CPF+name match):", nrow(conn_ownership), "\n")
 } else {
   conn_ownership <- data.table(
     politician_cpf = character(), politician_name = character(),
     station_cnpj = character(), type = character(),
     year = integer(), valor = numeric(), source = character()
   )
-  cat("    No ownership connections found\n")
+  cat("    No direct ownership connections found\n")
 }
+
+# --- 4g. Second-degree ownership (politician → shared firm → co-partner → gas station) ---
+cat("  Processing second-degree ownership connections...\n")
+
+# Load full socios for non-gas firms (need all firms, not just gas)
+# gas_socios was filtered to cnae_fiscal == 4731800; reload from socios before rm()
+# socios was already freed — reload it
+socios_full <- readRDS("data/raw/socios.rds")
+socios_pf <- socios_full[codigo_tipo_socio == 2]  # individuals only
+socios_pf[, middle6 := gsub("[*]", "", cpf_cnpj_socio)]
+socios_pf[, cname := clean_name(nome_socio)]
+socios_pf[, cnpj_clean := clean_cnpj(as.character(bit64::as.integer64(cnpj)))]
+socios_pf <- socios_pf[nchar(middle6) == 6 & !is.na(cname) & !is.na(cnpj_clean)]
+
+# Step 1: Find politicians in non-gas firms
+non_gas <- socios_pf[cnae_fiscal != 4731800]
+pol_in_firms <- merge(non_gas[, .(cnpj_shared = cnpj_clean, middle6, cname)],
+                      pol_cpf[, .(cpf, middle6, nome_clean)],
+                      by.x = c("middle6", "cname"),
+                      by.y = c("middle6", "nome_clean"),
+                      allow.cartesian = TRUE)
+cat("    Politicians in non-gas firms:", uniqueN(pol_in_firms$cpf), "\n")
+cat("    Shared firms:", uniqueN(pol_in_firms$cnpj_shared), "\n")
+
+# Step 2: Get co-partners at those shared firms (exclude the politician themselves)
+shared_firm_cnpjs <- unique(pol_in_firms$cnpj_shared)
+co_partners <- non_gas[cnpj_clean %in% shared_firm_cnpjs]
+# Exclude politicians themselves (by middle6 + name)
+pol_keys <- unique(pol_in_firms[, .(middle6, cname)])
+co_partners <- co_partners[!pol_keys, on = c("middle6", "cname")]
+
+# Step 3: Match co-partners to gas station owners (middle6 + name)
+gas_owners <- socios_pf[cnae_fiscal == 4731800,
+                         .(cnpj_gas = cnpj_clean, middle6, cname)]
+gas_owners <- unique(gas_owners)
+
+second_deg <- merge(co_partners[, .(cnpj_shared = cnpj_clean, middle6, cname)],
+                    gas_owners,
+                    by = c("middle6", "cname"),
+                    allow.cartesian = TRUE)
+
+# Step 4: Link back to politicians through shared firm
+second_full <- merge(second_deg[, .(cnpj_shared, cnpj_gas, intermediary_mid6 = middle6,
+                                     intermediary_name = cname)],
+                     pol_in_firms[, .(cpf, cnpj_shared)],
+                     by = "cnpj_shared",
+                     allow.cartesian = TRUE)
+
+# Deduplicate: unique politician-station pairs
+second_full <- unique(second_full, by = c("cpf", "cnpj_gas"))
+
+cat("    Second-degree edges:", nrow(second_full), "\n")
+cat("    Unique politicians:", uniqueN(second_full$cpf), "\n")
+cat("    Unique gas stations:", uniqueN(second_full$cnpj_gas), "\n")
+cat("    Unique intermediaries:", uniqueN(second_full[, paste(intermediary_mid6, intermediary_name)]), "\n")
+
+# Save detailed second-degree connections
+fwrite(second_full, file.path(OUT_DIR, "second_degree_details.csv"))
+
+# Build connection edges
+if (nrow(second_full) > 0) {
+  conn_second_deg <- second_full[, .(
+    politician_cpf = cpf,
+    politician_name = NA_character_,
+    station_cnpj = cnpj_gas,
+    type = "second_degree_ownership",
+    year = NA_integer_,
+    valor = NA_real_,
+    source = "qsa_second_degree"
+  )]
+} else {
+  conn_second_deg <- data.table(
+    politician_cpf = character(), politician_name = character(),
+    station_cnpj = character(), type = character(),
+    year = integer(), valor = numeric(), source = character()
+  )
+}
+
+rm(socios_full, socios_pf, non_gas, co_partners, gas_owners, second_deg)
+gc()
 
 # Combine all connections
 connections <- rbindlist(list(
   conn_ceap, conn_ceaps, conn_tse_exp, conn_tse_rec,
-  conn_states, conn_ownership
+  conn_states, conn_ownership, conn_second_deg
 ), fill = TRUE)
 
 cat("\n  Total connections:", nrow(connections), "\n")
@@ -662,6 +753,15 @@ self_dealing <- fintersect(
   unique(spending_pairs)
 )
 cat("  Self-dealing (owns station + spends there):", nrow(self_dealing), "\n")
+
+# Flag 1b: Politician spends at a station owned by their business associate (second-degree)
+second_deg_pairs <- connections[type == "second_degree_ownership", .(politician_cpf, station_cnpj)]
+second_deg_spending <- fintersect(
+  unique(second_deg_pairs),
+  unique(spending_pairs)
+)
+cat("  Second-degree dealing (co-partner owns station + politician spends there):",
+    nrow(second_deg_spending), "\n")
 
 # Flag 2: Politician receives donation from AND spends at same station
 donation_pairs <- connections[type == "campaign_donation", .(politician_cpf, station_cnpj)]
@@ -730,6 +830,9 @@ if (has_arrow) {
 if (nrow(self_dealing) > 0) {
   fwrite(self_dealing, file.path(OUT_DIR, "flag_self_dealing.csv"))
 }
+if (nrow(second_deg_spending) > 0) {
+  fwrite(second_deg_spending, file.path(OUT_DIR, "flag_second_degree_dealing.csv"))
+}
 if (nrow(round_trip) > 0) {
   fwrite(round_trip, file.path(OUT_DIR, "flag_round_trip.csv"))
 }
@@ -739,5 +842,6 @@ cat("  Politicians:", nrow(politicians), "\n")
 cat("  Gas stations:", nrow(stations), "\n")
 cat("  Connections:", nrow(connections), "\n")
 cat("  Self-dealing flags:", nrow(self_dealing), "\n")
+cat("  Second-degree dealing flags:", nrow(second_deg_spending), "\n")
 cat("  Round-trip flags:", nrow(round_trip), "\n")
 cat("\nDone. Files in:", OUT_DIR, "\n")
