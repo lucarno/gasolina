@@ -13,7 +13,7 @@ dir.create(RAW_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(FILTERED_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Election years (federal + municipal)
-YEARS <- c(2014, 2016, 2018, 2020, 2022, 2024)
+YEARS <- c(2002, 2004, 2006, 2008, 2010, 2012, 2014, 2016, 2018, 2020, 2022, 2024)
 
 base_url <- "https://cdn.tse.jus.br/estatistica/sead/odsele/consulta_cand/"
 

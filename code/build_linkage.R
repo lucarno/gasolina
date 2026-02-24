@@ -137,10 +137,11 @@ read_tse_exp <- function(f) {
                         "DT_DESPESA", "VR_DESPESA_CONTRATADA"), cols)
     dt <- dt[, ..keep]
   } else {
-    # Old format (2014-2016): map Portuguese column names
+    # Old format: map Portuguese/abbreviated column names to standard names
     # Extract year from filename (e.g., tse_combustivel_2014.csv)
     yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
     rename_map <- c(
+      # 2014-2016 format
       "Desc. Eleição" = "DS_ELEICAO",
       "UF" = "SG_UF",
       "CPF do candidato" = "NR_CPF_CANDIDATO",
@@ -154,14 +155,38 @@ read_tse_exp <- function(f) {
       "Nome do município do fornecedor" = "NM_MUNICIPIO_FORNECEDOR",
       "UF do fornecedor" = "SG_UF_FORNECEDOR",
       "Data da despesa" = "DT_DESPESA",
-      "Valor despesa" = "VR_DESPESA_CONTRATADA"
+      "Valor despesa" = "VR_DESPESA_CONTRATADA",
+      # 2002-2004 abbreviated format
+      "SG_UE" = "SG_UF",
+      "NO_CAND" = "NM_CANDIDATO",
+      "SEQUENCIAL_CANDIDATO" = "SQ_CANDIDATO",
+      "NR_CAND" = "NR_CANDIDATO",
+      "CD_CPF_CGC" = "NR_CPF_CNPJ_FORNECEDOR",
+      "NO_FOR" = "NM_FORNECEDOR",
+      "DT_DOC_DESP" = "DT_DESPESA",
+      "VR_DESPESA" = "VR_DESPESA_CONTRATADA",
+      "SG_PART" = "SG_PARTIDO",
+      "DS_MUNIC" = "NM_MUNICIPIO_FORNECEDOR",
+      # 2006 verbose format
+      "NOME_FORNECEDOR" = "NM_FORNECEDOR",
+      "NUMERO_CPF_CGC_FORNECEDOR" = "NR_CPF_CNPJ_FORNECEDOR",
+      "NOME_CANDIDATO" = "NM_CANDIDATO",
+      "SIGLA_PARTIDO" = "SG_PARTIDO",
+      "VALOR_DESPESA" = "VR_DESPESA_CONTRATADA",
+      "DATA_DESPESA" = "DT_DESPESA",
+      "UNIDADE_ELEITORAL_CANDIDATO" = "SG_UF",
+      "UNIDADE_ELEITORAL_FORNECEDOR" = "SG_UF_FORNECEDOR",
+      "DESCRICAO_CARGO" = "DS_CARGO",
+      # 2008 format (NM_CANDIDATO, SG_PARTIDO, SG_UE already handled)
+      "CD_CPF_CNPJ_FORNECEDOR" = "NR_CPF_CNPJ_FORNECEDOR",
+      "CD_NUM_CPF" = "NR_CPF_CANDIDATO"
     )
     # Also try Sigla Partido variants
     partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
     if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
 
     for (old_name in names(rename_map)) {
-      if (old_name %in% cols) {
+      if (old_name %in% cols && !(rename_map[old_name] %in% names(dt))) {
         setnames(dt, old_name, rename_map[old_name])
       }
     }
@@ -187,6 +212,92 @@ tse_exp[, supplier_cnpj := clean_cnpj(NR_CPF_CNPJ_FORNECEDOR)]
 tse_exp[, valor := as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", VR_DESPESA_CONTRATADA)))]
 cat("  ", nrow(tse_exp), "TSE expenditure records\n")
 
+# --- Fix missing CPFs: 2024 (all "-4"), 2002-2006 (no CPF column) ---
+# Uses SQ_CANDIDATO crosswalk + NM_CANDIDATO+SG_UF fallback from candidatos registry
+n_masked <- sum(tse_exp$NR_CPF_CANDIDATO == "-4" | is.na(tse_exp$politician_cpf), na.rm = TRUE)
+if (n_masked > 0 && "SQ_CANDIDATO" %in% names(tse_exp)) {
+  cat("  Fixing", n_masked, "records with masked CPFs (2024 data)...\n")
+  # Build crosswalk: SQ_CANDIDATO → NM_CANDIDATO from 2024, then match to prior-year CPFs
+  masked <- tse_exp[NR_CPF_CANDIDATO == "-4" | is.na(politician_cpf)]
+
+  # Get candidate names from candidatos registry (all years)
+  cand_files_all <- list.files("data/filtered/tse_candidatos", pattern = "\\.csv$", full.names = TRUE)
+  cand_cpf_list <- lapply(cand_files_all, function(cf) {
+    tryCatch({
+      d <- fread(cf, colClasses = "character")
+      pn <- names(d)
+      cpf_col <- pn[grepl("NR_CPF_CANDIDATO|CPF.do.candidato", pn)][1]
+      nm_col <- pn[grepl("NM_CANDIDATO|Nome.candidato", pn)][1]
+      uf_col <- pn[grepl("SG_UF|UF", pn)][1]
+      sq_col <- pn[grepl("SQ_CANDIDATO|Sequencial", pn)][1]
+      if (!is.na(cpf_col) && !is.na(nm_col) && !is.na(uf_col)) {
+        data.table(cpf = d[[cpf_col]], name = d[[nm_col]], uf = d[[uf_col]],
+                   sq = if (!is.na(sq_col)) d[[sq_col]] else NA_character_)
+      } else data.table()
+    }, error = function(e) data.table())
+  })
+  cand_cpf <- rbindlist(cand_cpf_list, fill = TRUE)
+
+  # Prior-year CPF map: name + UF → CPF (from years with real CPFs)
+  prior_cpf <- unique(cand_cpf[cpf != "-4" & cpf != "" & !is.na(cpf), .(name, uf, cpf)])
+  # Deduplicate: keep one CPF per name+UF (most common if multiple)
+  prior_cpf <- prior_cpf[, .(cpf = cpf[1]), by = .(name, uf)]
+
+  # Match via SQ: get NM_CANDIDATO for masked records from candidatos 2024
+  cand_2024 <- cand_cpf[cpf == "-4" & !is.na(sq), .(sq, name, uf)]
+  cand_2024 <- unique(cand_2024)
+
+  # Join masked records with 2024 candidatos by SQ, then with prior CPF by name+UF
+  sq_name <- unique(cand_2024[, .(sq, name, uf)])
+  sq_cpf <- merge(sq_name, prior_cpf, by = c("name", "uf"), all.x = TRUE)
+  sq_cpf <- sq_cpf[!is.na(cpf)]  # only keep matches
+
+  # For records that didn't match via SQ (first-time candidates), use NM_CANDIDATO directly
+  # from the expenditure file + prior_cpf
+  if ("NM_CANDIDATO" %in% names(tse_exp) && "SG_UF" %in% names(tse_exp)) {
+    direct_match <- merge(
+      unique(masked[, .(NM_CANDIDATO, SG_UF)]),
+      prior_cpf,
+      by.x = c("NM_CANDIDATO", "SG_UF"), by.y = c("name", "uf"),
+      all.x = TRUE
+    )
+    direct_match <- direct_match[!is.na(cpf)]
+  }
+
+  # Apply SQ-based CPF fix
+  n_fixed_sq <- 0
+  if (nrow(sq_cpf) > 0) {
+    sq_map <- sq_cpf[, .(sq, cpf)]
+    sq_map <- sq_map[!duplicated(sq)]
+    tse_exp <- merge(tse_exp, sq_map, by.x = "SQ_CANDIDATO", by.y = "sq", all.x = TRUE, suffixes = c("", ".fix"))
+    if ("cpf.fix" %in% names(tse_exp)) {
+      fixed_rows <- !is.na(tse_exp$cpf.fix) & (tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf))
+      n_fixed_sq <- sum(fixed_rows, na.rm = TRUE)
+      tse_exp[fixed_rows, politician_cpf := clean_cpf(cpf.fix)]
+      tse_exp[, cpf.fix := NULL]
+    }
+  }
+
+  # Apply direct name+UF match for remaining masked records
+  n_fixed_name <- 0
+  if (exists("direct_match") && nrow(direct_match) > 0) {
+    still_masked <- tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf)
+    if (any(still_masked, na.rm = TRUE)) {
+      tse_exp <- merge(tse_exp, unique(direct_match[, .(NM_CANDIDATO, SG_UF, cpf)]),
+                       by = c("NM_CANDIDATO", "SG_UF"), all.x = TRUE, suffixes = c("", ".fix2"))
+      fixed_rows2 <- !is.na(tse_exp$cpf.fix2) & (tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf))
+      n_fixed_name <- sum(fixed_rows2, na.rm = TRUE)
+      tse_exp[fixed_rows2, politician_cpf := clean_cpf(cpf.fix2)]
+      tse_exp[, cpf.fix2 := NULL]
+    }
+  }
+
+  n_still_masked <- sum((tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$NR_CPF_CANDIDATO)) & is.na(tse_exp$politician_cpf), na.rm = TRUE)
+  cat("    Fixed via SQ crosswalk:", n_fixed_sq, "\n")
+  cat("    Fixed via name+UF match:", n_fixed_name, "\n")
+  cat("    Still missing CPF:", n_still_masked, "\n")
+}
+
 # --- 1e. TSE Receipts (donations from gas stations) ---
 cat("Loading TSE receipts...\n")
 
@@ -205,6 +316,7 @@ read_tse_rec <- function(f) {
   } else {
     yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
     rename_map <- c(
+      # 2014-2016 Portuguese format
       "UF" = "SG_UF",
       "CPF do candidato" = "NR_CPF_CANDIDATO",
       "Nome candidato" = "NM_CANDIDATO",
@@ -214,13 +326,36 @@ read_tse_rec <- function(f) {
       "Nome do doador" = "NM_DOADOR",
       "Cod setor econômico do doador" = "CD_CNAE_DOADOR",
       "Data da receita" = "DT_RECEITA",
-      "Valor receita" = "VR_RECEITA"
+      "Valor receita" = "VR_RECEITA",
+      # 2002 abbreviated format
+      "SG_UF" = "SG_UF",
+      "NO_CAND" = "NM_CANDIDATO",
+      "SEQUENCIAL_CANDIDATO" = "SQ_CANDIDATO",
+      "CD_CPF_CGC" = "NR_CPF_CNPJ_DOADOR",
+      "NO_DOADOR" = "NM_DOADOR",
+      "SG_PART" = "SG_PARTIDO",
+      # 2004 format (CD_CPF_CGC_DOA instead of CD_CPF_CGC for donor)
+      "CD_CPF_CGC_DOA" = "NR_CPF_CNPJ_DOADOR",
+      "SG_UE" = "SG_UF",
+      # 2006 verbose format
+      "NOME_DOADOR" = "NM_DOADOR",
+      "NUMERO_CPF_CGC_DOADOR" = "NR_CPF_CNPJ_DOADOR",
+      "NOME_CANDIDATO" = "NM_CANDIDATO",
+      "SIGLA_PARTIDO" = "SG_PARTIDO",
+      "VALOR_RECEITA" = "VR_RECEITA",
+      "DATA_RECEITA" = "DT_RECEITA",
+      "UNIDADE_ELEITORAL_CANDIDATO" = "SG_UF",
+      "UNIDADE_ELEITORAL_DOADOR" = "SG_UF_DOADOR",
+      "DESCRICAO_CARGO" = "DS_CARGO",
+      # 2008 format
+      "CD_CPF_CNPJ_DOADOR" = "NR_CPF_CNPJ_DOADOR",
+      "CD_NUM_CPF" = "NR_CPF_CANDIDATO"
     )
     partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
     if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
 
     for (old_name in names(rename_map)) {
-      if (old_name %in% cols) {
+      if (old_name %in% cols && !(rename_map[old_name] %in% names(dt))) {
         setnames(dt, old_name, rename_map[old_name])
       }
     }
@@ -243,6 +378,28 @@ tse_rec[, politician_cpf := clean_cpf(NR_CPF_CANDIDATO)]
 tse_rec[, donor_cnpj := clean_cnpj(NR_CPF_CNPJ_DOADOR)]
 tse_rec[, valor := as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", VR_RECEITA)))]
 cat("  ", nrow(tse_rec), "TSE receipt records\n")
+
+# Fix missing CPFs in receipts (same approach as expenses)
+n_masked_rec <- sum(tse_rec$NR_CPF_CANDIDATO == "-4" | is.na(tse_rec$politician_cpf), na.rm = TRUE)
+if (n_masked_rec > 0 && exists("prior_cpf") && nrow(prior_cpf) > 0) {
+  if ("NM_CANDIDATO" %in% names(tse_rec) && "SG_UF" %in% names(tse_rec)) {
+    rec_match <- merge(
+      unique(tse_rec[is.na(politician_cpf), .(NM_CANDIDATO, SG_UF)]),
+      prior_cpf,
+      by.x = c("NM_CANDIDATO", "SG_UF"), by.y = c("name", "uf"),
+      all.x = TRUE
+    )
+    rec_match <- rec_match[!is.na(cpf)]
+    if (nrow(rec_match) > 0) {
+      tse_rec <- merge(tse_rec, unique(rec_match[, .(NM_CANDIDATO, SG_UF, cpf)]),
+                       by = c("NM_CANDIDATO", "SG_UF"), all.x = TRUE, suffixes = c("", ".fix"))
+      fixed <- !is.na(tse_rec$cpf.fix) & is.na(tse_rec$politician_cpf)
+      tse_rec[fixed, politician_cpf := clean_cpf(cpf.fix)]
+      tse_rec[, cpf.fix := NULL]
+      cat("    Fixed", sum(fixed), "receipt CPFs via name+UF match\n")
+    }
+  }
+}
 
 # --- 1f. States ---
 cat("Loading state data...\n")
@@ -330,6 +487,10 @@ gas_socios[, socio_name := clean_name(nome_socio)]
 cat("  ", nrow(gas_socios), "gas station ownership records,",
     uniqueN(gas_socios$cnpj_clean, na.rm = TRUE), "unique stations\n")
 
+# Keep individual socios (PF) for second-degree ownership analysis
+# Only retain columns needed: cnpj, cpf_cnpj_socio, nome_socio, cnae_fiscal, codigo_tipo_socio
+socios_pf_all <- socios[codigo_tipo_socio == 2,
+                        .(cnpj, cpf_cnpj_socio, nome_socio, cnae_fiscal)]
 rm(socios)  # free memory
 gc()
 
@@ -649,17 +810,20 @@ if (nrow(owner_pol) > 0) {
 }
 
 # --- 4g. Second-degree ownership (politician → shared firm → co-partner → gas station) ---
+# Free large objects no longer needed before heavy memory operation
+rm(gas_socios)
+gc()
 cat("  Processing second-degree ownership connections...\n")
 
-# Load full socios for non-gas firms (need all firms, not just gas)
-# gas_socios was filtered to cnae_fiscal == 4731800; reload from socios before rm()
-# socios was already freed — reload it
-socios_full <- readRDS("data/raw/socios.rds")
-socios_pf <- socios_full[codigo_tipo_socio == 2]  # individuals only
+# Use pre-saved socios_pf_all (individual partners) from initial load
+socios_pf <- copy(socios_pf_all)
 socios_pf[, middle6 := gsub("[*]", "", cpf_cnpj_socio)]
 socios_pf[, cname := clean_name(nome_socio)]
 socios_pf[, cnpj_clean := clean_cnpj(as.character(bit64::as.integer64(cnpj)))]
 socios_pf <- socios_pf[nchar(middle6) == 6 & !is.na(cname) & !is.na(cnpj_clean)]
+# Free the pre-saved copy
+rm(socios_pf_all)
+gc()
 
 # Step 1: Find politicians in non-gas firms
 non_gas <- socios_pf[cnae_fiscal != 4731800]

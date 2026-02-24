@@ -15,7 +15,9 @@ dir.create(RAW_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(FILTERED_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Election years with available campaign finance data
-YEARS <- c(2014, 2016, 2018, 2020, 2022, 2024)
+# Municipal: 2004, 2008, 2012, 2016, 2020, 2024
+# Federal/State: 2002, 2006, 2010, 2014, 2018, 2022
+YEARS <- c(2002, 2004, 2006, 2008, 2010, 2012, 2014, 2016, 2018, 2020, 2022, 2024)
 
 # Regex to match gas station / fuel supplier names
 FUEL_PATTERN <- paste0(
@@ -30,7 +32,8 @@ FUEL_PATTERN <- paste0(
 # URL patterns vary by year:
 #   2018+: prestacao_de_contas_eleitorais_candidatos_{year}.zip
 #   2016:  prestacao_contas_final_2016.zip
-#   2014:  prestacao_final_2014.zip
+#   2012-2014: prestacao_final_{year}.zip or prestacao_contas_final_{year}.zip
+#   2002-2010: prestacao_contas_{year}.zip
 base_url <- "https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/"
 
 # Build candidate URLs for each year (try multiple patterns)
@@ -41,8 +44,11 @@ tse_urls <- function(year) {
   )
   if (year == 2016) {
     candidates <- c(paste0("prestacao_contas_final_", year, ".zip"), candidates)
-  } else if (year == 2014) {
-    candidates <- c(paste0("prestacao_final_", year, ".zip"), candidates)
+  } else if (year <= 2014) {
+    candidates <- c(paste0("prestacao_contas_", year, ".zip"),
+                    paste0("prestacao_final_", year, ".zip"),
+                    paste0("prestacao_contas_final_", year, ".zip"),
+                    candidates)
   }
   paste0(base_url, candidates)
 }
@@ -75,7 +81,14 @@ for (year in YEARS) {
     next
   }
 
-  csv_files <- unzip(zip_file, exdir = file.path(RAW_DIR, year))
+  # Unzip — use system unzip for robustness with accented paths (pre-2012 zips)
+  # Exclude _brasil.txt files (2012+) which are multi-GB duplicates of per-state files
+  extract_dir <- file.path(RAW_DIR, year)
+  dir.create(extract_dir, recursive = TRUE, showWarnings = FALSE)
+  system2("unzip", c("-o", "-q", zip_file, "-x", "*_brasil.*", "-d", extract_dir))
+  csv_files <- list.files(extract_dir, pattern = "\\.(csv|txt)$",
+                          recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  csv_files <- csv_files[!grepl("leiame|readme|leioute", csv_files, ignore.case = TRUE)]
   # Look for the expenditure file (despesas)
   expense_files <- csv_files[grepl("despesa", csv_files, ignore.case = TRUE)]
   if (length(expense_files) == 0) expense_files <- csv_files
@@ -95,16 +108,23 @@ for (year in YEARS) {
       }
 
       # Find supplier name column (must be the name, not CNPJ/code columns)
-      supplier_col <- grep("^NM_FORNECEDOR$|^Nome do fornecedor$",
+      # Handles multiple TSE formats:
+      #   NM_FORNECEDOR (2008+), NOME_FORNECEDOR (2006),
+      #   Nome do fornecedor (2014-2016), NO_FOR (2002-2004)
+      supplier_col <- grep("^NM_FORNECEDOR$|^NOME_FORNECEDOR$|^Nome do fornecedor$|^NO_FOR$",
                           names(dt), ignore.case = TRUE, value = TRUE)
       if (length(supplier_col) == 0) {
-        cat("    No supplier column found in", basename(csv_file), "\n")
+        cat("    No supplier column found in", basename(csv_file), " cols:", paste(head(names(dt), 5), collapse=", "), "\n")
         next
       }
 
       fuel <- dt[grepl(FUEL_PATTERN, get(supplier_col[1]), ignore.case = TRUE)]
 
       if (nrow(fuel) > 0) {
+        # Coerce all columns to character to avoid type conflicts across files
+        for (col in names(fuel)) {
+          set(fuel, j = col, value = as.character(fuel[[col]]))
+        }
         all_fuel <- c(all_fuel, list(fuel))
       }
     }, error = function(e) {
@@ -133,7 +153,7 @@ for (year in YEARS) {
   }
 
   # --- Extract donation receipts (receitas) ---
-  # Receitas are in the same zip; filter for donors that are gas stations
+  # Receitas are in the same extracted directory; filter for donors that are gas stations
   receipt_files <- csv_files[grepl("receita", csv_files, ignore.case = TRUE)]
   # Exclude doador_originario (traced-back donors) to avoid double-counting
   receipt_files <- receipt_files[!grepl("doador_originario", receipt_files, ignore.case = TRUE)]
@@ -152,10 +172,13 @@ for (year in YEARS) {
       }
 
       # Find donor name column
-      donor_col <- grep("^NM_DOADOR$|^Nome do doador$",
+      # Handles multiple TSE formats:
+      #   NM_DOADOR (2008+), NOME_DOADOR (2006),
+      #   Nome do doador (2014-2016), NO_DOADOR (2002-2004)
+      donor_col <- grep("^NM_DOADOR$|^NOME_DOADOR$|^Nome do doador$|^NO_DOADOR$",
                         names(dt), ignore.case = TRUE, value = TRUE)
       if (length(donor_col) == 0) {
-        cat("    No donor column found in", basename(csv_file), "\n")
+        cat("    No donor column found in", basename(csv_file), " cols:", paste(head(names(dt), 5), collapse=", "), "\n")
         next
       }
 
