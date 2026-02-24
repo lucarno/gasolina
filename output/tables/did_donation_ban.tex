@@ -1,0 +1,26 @@
+\begin{table}
+\centering
+\caption{DiD: Corporate Donation Ban and Campaign Spending at Gas Stations}
+\centering
+\begin{tabular}[t]{lccc}
+\toprule
+  & (1) Basic DiD & (2) Dynamic DiD & (3) N Politicians\\
+\midrule
+(Intercept) & \num{8.020}*** & \num{8.110}*** & \num{0.943}***\\
+ & (\num{0.017}) & (\num{0.006}) & (\num{0.006})\\
+treatedTRUE & \num{1.729}*** &  & \num{0.246}***\\
+ & (\num{0.075}) &  & (\num{0.025})\\
+postTRUE & \num{0.090}*** &  & \num{0.123}***\\
+ & (\num{0.018}) &  & (\num{0.006})\\
+treatedTRUE x postTRUE & \num{-0.688}*** &  & \num{0.010}\\
+ & (\num{0.089}) &  & (\num{0.029})\\
+\midrule
+Num.Obs. & \num{88463} & \num{88463} & \num{88463}\\
+R2 & \num{0.011} & \num{0.006} & \num{0.009}\\
+R2 Adj. & \num{0.011} & \num{0.006} & \num{0.008}\\
+RMSE & \num{1.81} & \num{1.82} & \num{0.60}\\
+Std.Errors & IID & IID & IID\\
+\bottomrule
+\multicolumn{4}{l}{\rule{0pt}{1em}* p $<$ 0.1, ** p $<$ 0.05, *** p $<$ 0.01}\\
+\end{tabular}
+\end{table}

@@ -1,0 +1,27 @@
+\begin{table}
+\centering
+\caption{Panel Regressions: Gas Station Ownership and Spending}
+\centering
+\begin{tabular}[t]{lcccccc}
+\toprule
+  & (1) Log Spending & (2) + Office FE & (3) Politician FE & (4) HHI & (5) N Stations & (6) 2nd Degree\\
+\midrule
+(Intercept) & \num{4.394}*** & \num{4.394}*** &  & \num{1.000}*** & \num{1.000} & \num{4.394}***\\
+ & (\num{1.348}) & (\num{1.217}) &  & (\num{0.169}) & (\num{43.954}) & (\num{1.216})\\
+owns\_stationTRUE & \num{1.100}*** & \num{0.663}*** & \num{4.168} & \num{-0.020}*** & \num{-0.940} & \num{0.472}***\\
+ & (\num{0.039}) & (\num{0.035}) & (\num{22679.528}) & (\num{0.005}) & (\num{1.271}) & (\num{0.038})\\
+second\_degree\_connectedTRUE &  &  &  &  &  & \num{0.500}***\\
+ &  &  &  &  &  & (\num{0.036})\\
+\midrule
+Num.Obs. & \num{184868} & \num{184868} & \num{184868} & \num{184868} & \num{184868} & \num{184868}\\
+R2 & \num{0.299} & \num{0.429} & \num{0.936} & \num{0.399} & \num{0.041} & \num{0.429}\\
+R2 Adj. & \num{0.299} & \num{0.429} & \num{0.617} & \num{0.399} & \num{0.041} & \num{0.429}\\
+R2 Within &  &  & \num{0.000} &  &  & \\
+R2 Within Adj. &  &  & \num{0.000} &  &  & \\
+RMSE & \num{1.35} & \num{1.22} & \num{0.41} & \num{0.17} & \num{43.95} & \num{1.22}\\
+FE: year\_f &  &  & X &  &  & \\
+FE: politician\_cpf &  &  & X &  &  & \\
+\bottomrule
+\multicolumn{7}{l}{\rule{0pt}{1em}* p $<$ 0.1, ** p $<$ 0.05, *** p $<$ 0.01}\\
+\end{tabular}
+\end{table}
