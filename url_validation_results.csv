@@ -1,0 +1,88 @@
+source,label,url,status,ok
+ceap,Câmara CEAP 2008,https://www.camara.leg.br/cotas/Ano-2008.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2009,https://www.camara.leg.br/cotas/Ano-2009.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2010,https://www.camara.leg.br/cotas/Ano-2010.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2011,https://www.camara.leg.br/cotas/Ano-2011.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2012,https://www.camara.leg.br/cotas/Ano-2012.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2013,https://www.camara.leg.br/cotas/Ano-2013.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2014,https://www.camara.leg.br/cotas/Ano-2014.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2015,https://www.camara.leg.br/cotas/Ano-2015.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2016,https://www.camara.leg.br/cotas/Ano-2016.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2017,https://www.camara.leg.br/cotas/Ano-2017.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2018,https://www.camara.leg.br/cotas/Ano-2018.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2019,https://www.camara.leg.br/cotas/Ano-2019.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2020,https://www.camara.leg.br/cotas/Ano-2020.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2021,https://www.camara.leg.br/cotas/Ano-2021.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2022,https://www.camara.leg.br/cotas/Ano-2022.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2023,https://www.camara.leg.br/cotas/Ano-2023.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2024,https://www.camara.leg.br/cotas/Ano-2024.csv.zip,000000,FALSE
+ceap,Câmara CEAP 2025,https://www.camara.leg.br/cotas/Ano-2025.csv.zip,000000,FALSE
+ceaps,Senado CEAPS 2008,https://www.senado.leg.br/transparencia/LAI/verba/2008.csv,000000,FALSE
+ceaps,Senado CEAPS 2009,https://www.senado.leg.br/transparencia/LAI/verba/2009.csv,000000,FALSE
+ceaps,Senado CEAPS 2010,https://www.senado.leg.br/transparencia/LAI/verba/2010.csv,000000,FALSE
+ceaps,Senado CEAPS 2011,https://www.senado.leg.br/transparencia/LAI/verba/2011.csv,000000,FALSE
+ceaps,Senado CEAPS 2012,https://www.senado.leg.br/transparencia/LAI/verba/2012.csv,000000,FALSE
+ceaps,Senado CEAPS 2013,https://www.senado.leg.br/transparencia/LAI/verba/2013.csv,000000,FALSE
+ceaps,Senado CEAPS 2014,https://www.senado.leg.br/transparencia/LAI/verba/2014.csv,000000,FALSE
+ceaps,Senado CEAPS 2015,https://www.senado.leg.br/transparencia/LAI/verba/2015.csv,000000,FALSE
+ceaps,Senado CEAPS 2016,https://www.senado.leg.br/transparencia/LAI/verba/2016.csv,000000,FALSE
+ceaps,Senado CEAPS 2017,https://www.senado.leg.br/transparencia/LAI/verba/2017.csv,000000,FALSE
+ceaps,Senado CEAPS 2018,https://www.senado.leg.br/transparencia/LAI/verba/2018.csv,000000,FALSE
+ceaps,Senado CEAPS 2019,https://www.senado.leg.br/transparencia/LAI/verba/2019.csv,000000,FALSE
+ceaps,Senado CEAPS 2020,https://www.senado.leg.br/transparencia/LAI/verba/2020.csv,000000,FALSE
+ceaps,Senado CEAPS 2021,https://www.senado.leg.br/transparencia/LAI/verba/2021.csv,000000,FALSE
+ceaps,Senado CEAPS 2022,https://www.senado.leg.br/transparencia/LAI/verba/2022.csv,000000,FALSE
+ceaps,Senado CEAPS 2023,https://www.senado.leg.br/transparencia/LAI/verba/2023.csv,000000,FALSE
+ceaps,Senado CEAPS 2024,https://www.senado.leg.br/transparencia/LAI/verba/2024.csv,000000,FALSE
+ceaps,Senado CEAPS 2025,https://www.senado.leg.br/transparencia/LAI/verba/2025.csv,000000,FALSE
+tse,TSE despesas_contratadas 2014,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2014.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2014,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2014.zip,000000,FALSE
+tse,TSE despesas_contratadas 2016,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2016.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2016,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2016.zip,000000,FALSE
+tse,TSE despesas_contratadas 2018,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2018.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2018,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2018.zip,000000,FALSE
+tse,TSE despesas_contratadas 2020,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2020.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2020,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2020.zip,000000,FALSE
+tse,TSE despesas_contratadas 2022,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2022.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2022,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2022.zip,000000,FALSE
+tse,TSE despesas_contratadas 2024,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/despesas_contratadas_candidatos_2024.zip,000000,FALSE
+tse,TSE prestacao_contas (alt) 2024,https://cdn.tse.jus.br/estatistica/sead/odsele/prestacao_contas/prestacao_de_contas_eleitorais_candidatos_2024.zip,000000,FALSE
+states/SC,SC ALESC 2019,https://transparencia.alesc.sc.gov.br/gabinetes_csv.php?ano=2019,000000,FALSE
+states/SC,SC ALESC 2022,https://transparencia.alesc.sc.gov.br/gabinetes_csv.php?ano=2022,000000,FALSE
+states/SC,SC ALESC 2025,https://transparencia.alesc.sc.gov.br/gabinetes_csv.php?ano=2025,000000,FALSE
+states/SP,SP ALESP 2015,https://www.al.sp.gov.br/repositorioDados/deputados/despesas_gabinetes_2015.zip,000000,FALSE
+states/SP,SP ALESP 2020,https://www.al.sp.gov.br/repositorioDados/deputados/despesas_gabinetes_2020.zip,000000,FALSE
+states/SP,SP ALESP 2025,https://www.al.sp.gov.br/repositorioDados/deputados/despesas_gabinetes_2025.zip,000000,FALSE
+states/MG,MG ALMG 2019/1,https://dadosabertos.almg.gov.br/ws/prestacao_contas/verbas_indenizatorias/deputados/2019/1?formato=json,000000,FALSE
+states/MG,MG ALMG 2022/6,https://dadosabertos.almg.gov.br/ws/prestacao_contas/verbas_indenizatorias/deputados/2022/6?formato=json,000000,FALSE
+states/MG,MG ALMG 2025/1,https://dadosabertos.almg.gov.br/ws/prestacao_contas/verbas_indenizatorias/deputados/2025/1?formato=json,000000,FALSE
+states/DF,DF CLDF portal,https://dados.cl.df.gov.br/dataset/verbas-indenizatorias,000000,FALSE
+states/PE,PE ALEPE 2019,https://dadosabertos.alepe.pe.gov.br/api/verbas_indenizatorias/2019?formato=csv,000000,FALSE
+states/PE,PE ALEPE 2022,https://dadosabertos.alepe.pe.gov.br/api/verbas_indenizatorias/2022?formato=csv,000000,FALSE
+states/PE,PE ALEPE 2025,https://dadosabertos.alepe.pe.gov.br/api/verbas_indenizatorias/2025?formato=csv,000000,FALSE
+states/CE,CE ALCE 2019,https://www2.al.ce.gov.br/api/despesas/verbas_indenizatorias/2019?formato=csv,000000,FALSE
+states/CE,CE ALCE 2022,https://www2.al.ce.gov.br/api/despesas/verbas_indenizatorias/2022?formato=csv,000000,FALSE
+states/CE,CE ALCE 2025,https://www2.al.ce.gov.br/api/despesas/verbas_indenizatorias/2025?formato=csv,000000,FALSE
+states/RS,RS ALERS 2019,http://www2.al.rs.gov.br/transparenciaalrs/DadosAbertos/Despesas_2019.csv,403,FALSE
+states/RS,RS ALERS 2022,http://www2.al.rs.gov.br/transparenciaalrs/DadosAbertos/Despesas_2022.csv,403,FALSE
+states/RS,RS ALERS 2025,http://www2.al.rs.gov.br/transparenciaalrs/DadosAbertos/Despesas_2025.csv,403,FALSE
+states/PI,PI ALEPI portal,https://www.al.pi.leg.br/transparencia-menu/dados-abertos,000000,FALSE
+states/RN,RN ALERN portal,https://transparencia.al.rn.leg.br,000000,FALSE
+states/AC,AC portal,https://app.al.ac.leg.br,000000,FALSE
+states/AL,AL portal,https://www.al.al.leg.br/transparencia,000000,FALSE
+states/AM,AM portal,https://www.aleam.gov.br/transparencia/despesa/,000000,FALSE
+states/ES,ES portal,https://www.al.es.gov.br/Transparencia,000000,FALSE
+states/GO,GO portal,https://transparencia.al.go.leg.br,000000,FALSE
+states/MT,MT portal,https://www.al.mt.gov.br/transparencia/,000000,FALSE
+states/PR,PR portal,https://transparencia.assembleia.pr.leg.br,000000,FALSE
+states/PA,PA portal,https://www.alepa.pa.gov.br/Home/Page/PORTALDATRANSPARENCIA,000000,FALSE
+states/RO,RO portal,https://transparencia.al.ro.leg.br,000000,FALSE
+states/MS,MS portal,https://www.transparencia.al.ms.gov.br/pages/,000000,FALSE
+states/AP,AP portal,https://al.ap.leg.br/transparencia/,000000,FALSE
+states/BA,BA portal,https://www.al.ba.gov.br/transparencia,000000,FALSE
+states/MA,MA portal,https://sistemas.al.ma.leg.br/transparencia/,000000,FALSE
+states/PB,PB portal,https://www.al.pb.leg.br/transparencia,000000,FALSE
+states/RJ,RJ portal,https://transparencia.alerj.rj.gov.br,000000,FALSE
+states/RR,RR portal,https://transparencia.al.rr.leg.br,000000,FALSE
+states/SE,SE portal,https://al.se.leg.br/portal-da-transparencia/,000000,FALSE
+states/TO,TO portal,https://www.al.to.leg.br/transparencia,000000,FALSE
