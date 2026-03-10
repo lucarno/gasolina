@@ -1,0 +1,1011 @@
+# build_linkage.R
+# Phase 2: Data Linkage & Entity Resolution
+#
+# Builds three master tables:
+#   1. politicians  — unique politicians with CPF, name, party, office level
+#   2. stations     — unique gas stations with CNPJ, name, location, ownership
+#   3. connections  — edges linking politicians to stations (spending, donations, ownership)
+#
+# Input:  data/filtered/{ceap,ceaps,tse,tse_candidatos,states,anp}/ + data/raw/socios.rds
+# Output: data/linked/{politicians.parquet, stations.parquet, connections.parquet}
+
+library(data.table)
+
+OUT_DIR <- "data/linked"
+dir.create(OUT_DIR, recursive = TRUE, showWarnings = FALSE)
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+#' Clean a CNPJ string to 14-digit zero-padded format
+#' Handles: formatted strings ("12.345.678/0001-90"), integer64, numeric, plain strings
+clean_cnpj <- function(x) {
+  x <- as.character(x)
+  x <- gsub("[^0-9]", "", x)             # strip non-digits
+  x[nchar(x) == 0] <- NA_character_
+  x[!is.na(x)] <- sprintf("%014s", x[!is.na(x)])  # left-pad with zeros
+  x[!is.na(x)] <- gsub(" ", "0", x[!is.na(x)])    # sprintf %s pads with spaces
+  # Validate: must be exactly 14 digits
+  x[!is.na(x) & nchar(x) != 14] <- NA_character_
+  x
+}
+
+#' Clean a CPF string to 11-digit zero-padded format
+clean_cpf <- function(x) {
+  x <- as.character(x)
+  x <- gsub("[^0-9]", "", x)
+  x[nchar(x) == 0] <- NA_character_
+  x[!is.na(x)] <- sprintf("%011s", x[!is.na(x)])
+  x[!is.na(x)] <- gsub(" ", "0", x[!is.na(x)])
+  x[!is.na(x) & nchar(x) != 11] <- NA_character_
+  x
+}
+
+#' Normalize a name: uppercase, remove accents, collapse whitespace
+clean_name <- function(x) {
+  x <- toupper(trimws(x))
+  x <- iconv(x, to = "ASCII//TRANSLIT")
+  x <- gsub("[^A-Z ]", "", x)  # keep only letters and spaces
+  x <- gsub("\\s+", " ", x)
+  x[x == "" | x == " "] <- NA_character_
+  x
+}
+
+#' Extract year from a date string (tries multiple formats)
+extract_year <- function(x) {
+  x <- as.character(x)
+  # Try YYYY-MM-DD
+  y <- as.integer(substr(x, 1, 4))
+  # Try DD/MM/YYYY
+  bad <- is.na(y) | y < 1990 | y > 2030
+  if (any(bad, na.rm = TRUE)) {
+    y2 <- as.integer(substr(x[bad], 7, 10))
+    y[bad] <- y2
+  }
+  y
+}
+
+cat("=== Phase 2: Data Linkage & Entity Resolution ===\n\n")
+
+# ============================================================
+# 1. Load and standardize all datasets
+# ============================================================
+
+# --- 1a. Candidatos (TSE candidate registry) ---
+cat("Loading candidatos...\n")
+cand_files <- list.files("data/filtered/tse_candidatos", pattern = "\\.csv$", full.names = TRUE)
+cand_list <- lapply(cand_files, function(f) {
+  dt <- fread(f, select = c("ANO_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                             "NM_CANDIDATO", "NM_URNA_CANDIDATO",
+                             "SG_PARTIDO", "CD_CARGO", "DS_CARGO",
+                             "SQ_CANDIDATO", "DS_SIT_TOT_TURNO",
+                             "DS_SITUACAO_CANDIDATURA"),
+              colClasses = list(character = c("NR_CPF_CANDIDATO", "SQ_CANDIDATO")))
+  dt
+})
+candidatos <- rbindlist(cand_list, fill = TRUE)
+candidatos[, cpf := clean_cpf(NR_CPF_CANDIDATO)]
+candidatos[, nome_clean := clean_name(NM_CANDIDATO)]
+cat("  ", nrow(candidatos), "candidate-election records,",
+    uniqueN(candidatos$cpf, na.rm = TRUE), "unique CPFs\n")
+
+# --- 1b. CEAP (Câmara dos Deputados) ---
+cat("Loading CEAP...\n")
+ceap_files <- list.files("data/filtered/ceap", pattern = "\\.csv$", full.names = TRUE)
+ceap_list <- lapply(ceap_files, function(f) {
+  dt <- fread(f, select = c("txNomeParlamentar", "cpf", "txtCNPJCPF",
+                             "sgPartido", "sgUF", "vlrLiquido",
+                             "numAno", "numMes", "txtFornecedor"),
+              colClasses = list(character = c("cpf", "txtCNPJCPF")))
+  dt
+})
+ceap <- rbindlist(ceap_list, fill = TRUE)
+ceap[, politician_cpf := clean_cpf(cpf)]
+ceap[, supplier_cnpj := clean_cnpj(txtCNPJCPF)]
+ceap[, politician_name := clean_name(txNomeParlamentar)]
+cat("  ", nrow(ceap), "CEAP records\n")
+
+# --- 1c. CEAPS (Senado Federal) ---
+cat("Loading CEAPS...\n")
+ceaps_files <- list.files("data/filtered/ceaps", pattern = "\\.csv$", full.names = TRUE)
+ceaps_list <- lapply(ceaps_files, function(f) {
+  dt <- fread(f, colClasses = "character")
+  dt
+})
+ceaps <- rbindlist(ceaps_list, fill = TRUE)
+ceaps[, supplier_cnpj := clean_cnpj(CNPJ_CPF)]
+ceaps[, politician_name := clean_name(SENADOR)]
+# Parse value
+ceaps[, valor := as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", VALOR_REEMBOLSADO)))]
+cat("  ", nrow(ceaps), "CEAPS records\n")
+
+# --- 1d. TSE Expenditures ---
+cat("Loading TSE expenditures...\n")
+
+# Helper: read TSE expenditure file, normalizing old/new column names
+read_tse_exp <- function(f) {
+  dt <- fread(f, colClasses = "character")
+  cols <- names(dt)
+  if ("AA_ELEICAO" %in% cols) {
+    # New format (2018+): select standard columns
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_FORNECEDOR",
+                        "NM_FORNECEDOR", "CD_CNAE_FORNECEDOR",
+                        "NM_MUNICIPIO_FORNECEDOR", "SG_UF_FORNECEDOR",
+                        "DT_DESPESA", "VR_DESPESA_CONTRATADA"), cols)
+    dt <- dt[, ..keep]
+  } else {
+    # Old format: map Portuguese/abbreviated column names to standard names
+    # Extract year from filename (e.g., tse_combustivel_2014.csv)
+    yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
+    rename_map <- c(
+      # 2014-2016 format
+      "Desc. Eleição" = "DS_ELEICAO",
+      "UF" = "SG_UF",
+      "CPF do candidato" = "NR_CPF_CANDIDATO",
+      "Nome candidato" = "NM_CANDIDATO",
+      "Sequencial Candidato" = "SQ_CANDIDATO",
+      "Numero candidato" = "NR_CANDIDATO",
+      "Cargo" = "DS_CARGO",
+      "CPF/CNPJ do fornecedor" = "NR_CPF_CNPJ_FORNECEDOR",
+      "Nome do fornecedor" = "NM_FORNECEDOR",
+      "Cod setor econômico do fornecedor" = "CD_CNAE_FORNECEDOR",
+      "Nome do município do fornecedor" = "NM_MUNICIPIO_FORNECEDOR",
+      "UF do fornecedor" = "SG_UF_FORNECEDOR",
+      "Data da despesa" = "DT_DESPESA",
+      "Valor despesa" = "VR_DESPESA_CONTRATADA",
+      # 2002-2004 abbreviated format
+      "SG_UE" = "SG_UF",
+      "NO_CAND" = "NM_CANDIDATO",
+      "SEQUENCIAL_CANDIDATO" = "SQ_CANDIDATO",
+      "NR_CAND" = "NR_CANDIDATO",
+      "CD_CPF_CGC" = "NR_CPF_CNPJ_FORNECEDOR",
+      "NO_FOR" = "NM_FORNECEDOR",
+      "DT_DOC_DESP" = "DT_DESPESA",
+      "VR_DESPESA" = "VR_DESPESA_CONTRATADA",
+      "SG_PART" = "SG_PARTIDO",
+      "DS_MUNIC" = "NM_MUNICIPIO_FORNECEDOR",
+      # 2006 verbose format
+      "NOME_FORNECEDOR" = "NM_FORNECEDOR",
+      "NUMERO_CPF_CGC_FORNECEDOR" = "NR_CPF_CNPJ_FORNECEDOR",
+      "NOME_CANDIDATO" = "NM_CANDIDATO",
+      "SIGLA_PARTIDO" = "SG_PARTIDO",
+      "VALOR_DESPESA" = "VR_DESPESA_CONTRATADA",
+      "DATA_DESPESA" = "DT_DESPESA",
+      "UNIDADE_ELEITORAL_CANDIDATO" = "SG_UF",
+      "UNIDADE_ELEITORAL_FORNECEDOR" = "SG_UF_FORNECEDOR",
+      "DESCRICAO_CARGO" = "DS_CARGO",
+      # 2008 format (NM_CANDIDATO, SG_PARTIDO, SG_UE already handled)
+      "CD_CPF_CNPJ_FORNECEDOR" = "NR_CPF_CNPJ_FORNECEDOR",
+      "CD_NUM_CPF" = "NR_CPF_CANDIDATO"
+    )
+    # Also try Sigla Partido variants
+    partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
+    if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
+
+    for (old_name in names(rename_map)) {
+      if (old_name %in% cols && !(rename_map[old_name] %in% names(dt))) {
+        setnames(dt, old_name, rename_map[old_name])
+      }
+    }
+    dt[, AA_ELEICAO := yr]
+    # Keep only standard columns that exist
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_FORNECEDOR",
+                        "NM_FORNECEDOR", "CD_CNAE_FORNECEDOR",
+                        "NM_MUNICIPIO_FORNECEDOR", "SG_UF_FORNECEDOR",
+                        "DT_DESPESA", "VR_DESPESA_CONTRATADA"), names(dt))
+    dt <- dt[, ..keep]
+  }
+  dt
+}
+
+tse_exp_files <- list.files("data/filtered/tse", pattern = "^tse_combustivel_",
+                             full.names = TRUE)
+tse_exp_list <- lapply(tse_exp_files, read_tse_exp)
+tse_exp <- rbindlist(tse_exp_list, fill = TRUE)
+tse_exp[, politician_cpf := clean_cpf(NR_CPF_CANDIDATO)]
+tse_exp[, supplier_cnpj := clean_cnpj(NR_CPF_CNPJ_FORNECEDOR)]
+tse_exp[, valor := as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", VR_DESPESA_CONTRATADA)))]
+cat("  ", nrow(tse_exp), "TSE expenditure records\n")
+
+# --- Fix missing CPFs: 2024 (all "-4"), 2002-2006 (no CPF column) ---
+# Uses SQ_CANDIDATO crosswalk + NM_CANDIDATO+SG_UF fallback from candidatos registry
+n_masked <- sum(tse_exp$NR_CPF_CANDIDATO == "-4" | is.na(tse_exp$politician_cpf), na.rm = TRUE)
+if (n_masked > 0 && "SQ_CANDIDATO" %in% names(tse_exp)) {
+  cat("  Fixing", n_masked, "records with masked CPFs (2024 data)...\n")
+  # Build crosswalk: SQ_CANDIDATO → NM_CANDIDATO from 2024, then match to prior-year CPFs
+  masked <- tse_exp[NR_CPF_CANDIDATO == "-4" | is.na(politician_cpf)]
+
+  # Get candidate names from candidatos registry (all years)
+  cand_files_all <- list.files("data/filtered/tse_candidatos", pattern = "\\.csv$", full.names = TRUE)
+  cand_cpf_list <- lapply(cand_files_all, function(cf) {
+    tryCatch({
+      d <- fread(cf, colClasses = "character")
+      pn <- names(d)
+      cpf_col <- pn[grepl("NR_CPF_CANDIDATO|CPF.do.candidato", pn)][1]
+      nm_col <- pn[grepl("NM_CANDIDATO|Nome.candidato", pn)][1]
+      uf_col <- pn[grepl("SG_UF|UF", pn)][1]
+      sq_col <- pn[grepl("SQ_CANDIDATO|Sequencial", pn)][1]
+      if (!is.na(cpf_col) && !is.na(nm_col) && !is.na(uf_col)) {
+        data.table(cpf = d[[cpf_col]], name = d[[nm_col]], uf = d[[uf_col]],
+                   sq = if (!is.na(sq_col)) d[[sq_col]] else NA_character_)
+      } else data.table()
+    }, error = function(e) data.table())
+  })
+  cand_cpf <- rbindlist(cand_cpf_list, fill = TRUE)
+
+  # Prior-year CPF map: name + UF → CPF (from years with real CPFs)
+  prior_cpf <- unique(cand_cpf[cpf != "-4" & cpf != "" & !is.na(cpf), .(name, uf, cpf)])
+  # Deduplicate: keep one CPF per name+UF (most common if multiple)
+  prior_cpf <- prior_cpf[, .(cpf = cpf[1]), by = .(name, uf)]
+
+  # Match via SQ: get NM_CANDIDATO for masked records from candidatos 2024
+  cand_2024 <- cand_cpf[cpf == "-4" & !is.na(sq), .(sq, name, uf)]
+  cand_2024 <- unique(cand_2024)
+
+  # Join masked records with 2024 candidatos by SQ, then with prior CPF by name+UF
+  sq_name <- unique(cand_2024[, .(sq, name, uf)])
+  sq_cpf <- merge(sq_name, prior_cpf, by = c("name", "uf"), all.x = TRUE)
+  sq_cpf <- sq_cpf[!is.na(cpf)]  # only keep matches
+
+  # For records that didn't match via SQ (first-time candidates), use NM_CANDIDATO directly
+  # from the expenditure file + prior_cpf
+  if ("NM_CANDIDATO" %in% names(tse_exp) && "SG_UF" %in% names(tse_exp)) {
+    direct_match <- merge(
+      unique(masked[, .(NM_CANDIDATO, SG_UF)]),
+      prior_cpf,
+      by.x = c("NM_CANDIDATO", "SG_UF"), by.y = c("name", "uf"),
+      all.x = TRUE
+    )
+    direct_match <- direct_match[!is.na(cpf)]
+  }
+
+  # Apply SQ-based CPF fix
+  n_fixed_sq <- 0
+  if (nrow(sq_cpf) > 0) {
+    sq_map <- sq_cpf[, .(sq, cpf)]
+    sq_map <- sq_map[!duplicated(sq)]
+    tse_exp <- merge(tse_exp, sq_map, by.x = "SQ_CANDIDATO", by.y = "sq", all.x = TRUE, suffixes = c("", ".fix"))
+    if ("cpf.fix" %in% names(tse_exp)) {
+      fixed_rows <- !is.na(tse_exp$cpf.fix) & (tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf))
+      n_fixed_sq <- sum(fixed_rows, na.rm = TRUE)
+      tse_exp[fixed_rows, politician_cpf := clean_cpf(cpf.fix)]
+      tse_exp[, cpf.fix := NULL]
+    }
+  }
+
+  # Apply direct name+UF match for remaining masked records
+  n_fixed_name <- 0
+  if (exists("direct_match") && nrow(direct_match) > 0) {
+    still_masked <- tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf)
+    if (any(still_masked, na.rm = TRUE)) {
+      tse_exp <- merge(tse_exp, unique(direct_match[, .(NM_CANDIDATO, SG_UF, cpf)]),
+                       by = c("NM_CANDIDATO", "SG_UF"), all.x = TRUE, suffixes = c("", ".fix2"))
+      fixed_rows2 <- !is.na(tse_exp$cpf.fix2) & (tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$politician_cpf))
+      n_fixed_name <- sum(fixed_rows2, na.rm = TRUE)
+      tse_exp[fixed_rows2, politician_cpf := clean_cpf(cpf.fix2)]
+      tse_exp[, cpf.fix2 := NULL]
+    }
+  }
+
+  n_still_masked <- sum((tse_exp$NR_CPF_CANDIDATO %in% "-4" | is.na(tse_exp$NR_CPF_CANDIDATO)) & is.na(tse_exp$politician_cpf), na.rm = TRUE)
+  cat("    Fixed via SQ crosswalk:", n_fixed_sq, "\n")
+  cat("    Fixed via name+UF match:", n_fixed_name, "\n")
+  cat("    Still missing CPF:", n_still_masked, "\n")
+}
+
+# --- 1e. TSE Receipts (donations from gas stations) ---
+cat("Loading TSE receipts...\n")
+
+# Helper: read TSE receipt file, normalizing old/new column names
+read_tse_rec <- function(f) {
+  dt <- fread(f, colClasses = "character")
+  cols <- names(dt)
+  if ("AA_ELEICAO" %in% cols) {
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_DOADOR",
+                        "NM_DOADOR", "CD_CNAE_DOADOR",
+                        "NM_MUNICIPIO_DOADOR", "SG_UF_DOADOR",
+                        "DT_RECEITA", "VR_RECEITA"), cols)
+    dt <- dt[, ..keep]
+  } else {
+    yr <- gsub(".*_(\\d{4})\\.csv$", "\\1", basename(f))
+    rename_map <- c(
+      # 2014-2016 Portuguese format
+      "UF" = "SG_UF",
+      "CPF do candidato" = "NR_CPF_CANDIDATO",
+      "Nome candidato" = "NM_CANDIDATO",
+      "Sequencial Candidato" = "SQ_CANDIDATO",
+      "Cargo" = "DS_CARGO",
+      "CPF/CNPJ do doador" = "NR_CPF_CNPJ_DOADOR",
+      "Nome do doador" = "NM_DOADOR",
+      "Cod setor econômico do doador" = "CD_CNAE_DOADOR",
+      "Data da receita" = "DT_RECEITA",
+      "Valor receita" = "VR_RECEITA",
+      # 2002 abbreviated format
+      "SG_UF" = "SG_UF",
+      "NO_CAND" = "NM_CANDIDATO",
+      "SEQUENCIAL_CANDIDATO" = "SQ_CANDIDATO",
+      "CD_CPF_CGC" = "NR_CPF_CNPJ_DOADOR",
+      "NO_DOADOR" = "NM_DOADOR",
+      "SG_PART" = "SG_PARTIDO",
+      # 2004 format (CD_CPF_CGC_DOA instead of CD_CPF_CGC for donor)
+      "CD_CPF_CGC_DOA" = "NR_CPF_CNPJ_DOADOR",
+      "SG_UE" = "SG_UF",
+      # 2006 verbose format
+      "NOME_DOADOR" = "NM_DOADOR",
+      "NUMERO_CPF_CGC_DOADOR" = "NR_CPF_CNPJ_DOADOR",
+      "NOME_CANDIDATO" = "NM_CANDIDATO",
+      "SIGLA_PARTIDO" = "SG_PARTIDO",
+      "VALOR_RECEITA" = "VR_RECEITA",
+      "DATA_RECEITA" = "DT_RECEITA",
+      "UNIDADE_ELEITORAL_CANDIDATO" = "SG_UF",
+      "UNIDADE_ELEITORAL_DOADOR" = "SG_UF_DOADOR",
+      "DESCRICAO_CARGO" = "DS_CARGO",
+      # 2008 format
+      "CD_CPF_CNPJ_DOADOR" = "NR_CPF_CNPJ_DOADOR",
+      "CD_NUM_CPF" = "NR_CPF_CANDIDATO"
+    )
+    partido_col <- grep("Sigla.*Partido|Partido", cols, value = TRUE, ignore.case = TRUE)
+    if (length(partido_col) > 0) rename_map[partido_col[1]] <- "SG_PARTIDO"
+
+    for (old_name in names(rename_map)) {
+      if (old_name %in% cols && !(rename_map[old_name] %in% names(dt))) {
+        setnames(dt, old_name, rename_map[old_name])
+      }
+    }
+    dt[, AA_ELEICAO := yr]
+    keep <- intersect(c("AA_ELEICAO", "SG_UF", "NR_CPF_CANDIDATO",
+                        "NM_CANDIDATO", "SQ_CANDIDATO", "SG_PARTIDO",
+                        "DS_CARGO", "NR_CPF_CNPJ_DOADOR",
+                        "NM_DOADOR", "CD_CNAE_DOADOR",
+                        "DT_RECEITA", "VR_RECEITA"), names(dt))
+    dt <- dt[, ..keep]
+  }
+  dt
+}
+
+tse_rec_files <- list.files("data/filtered/tse", pattern = "^tse_receitas_",
+                             full.names = TRUE)
+tse_rec_list <- lapply(tse_rec_files, read_tse_rec)
+tse_rec <- rbindlist(tse_rec_list, fill = TRUE)
+tse_rec[, politician_cpf := clean_cpf(NR_CPF_CANDIDATO)]
+tse_rec[, donor_cnpj := clean_cnpj(NR_CPF_CNPJ_DOADOR)]
+tse_rec[, valor := as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", VR_RECEITA)))]
+cat("  ", nrow(tse_rec), "TSE receipt records\n")
+
+# Fix missing CPFs in receipts (same approach as expenses)
+n_masked_rec <- sum(tse_rec$NR_CPF_CANDIDATO == "-4" | is.na(tse_rec$politician_cpf), na.rm = TRUE)
+if (n_masked_rec > 0 && exists("prior_cpf") && nrow(prior_cpf) > 0) {
+  if ("NM_CANDIDATO" %in% names(tse_rec) && "SG_UF" %in% names(tse_rec)) {
+    rec_match <- merge(
+      unique(tse_rec[is.na(politician_cpf), .(NM_CANDIDATO, SG_UF)]),
+      prior_cpf,
+      by.x = c("NM_CANDIDATO", "SG_UF"), by.y = c("name", "uf"),
+      all.x = TRUE
+    )
+    rec_match <- rec_match[!is.na(cpf)]
+    if (nrow(rec_match) > 0) {
+      tse_rec <- merge(tse_rec, unique(rec_match[, .(NM_CANDIDATO, SG_UF, cpf)]),
+                       by = c("NM_CANDIDATO", "SG_UF"), all.x = TRUE, suffixes = c("", ".fix"))
+      fixed <- !is.na(tse_rec$cpf.fix) & is.na(tse_rec$politician_cpf)
+      tse_rec[fixed, politician_cpf := clean_cpf(cpf.fix)]
+      tse_rec[, cpf.fix := NULL]
+      cat("    Fixed", sum(fixed), "receipt CPFs via name+UF match\n")
+    }
+  }
+}
+
+# --- 1f. States ---
+cat("Loading state data...\n")
+
+# DF
+df_files <- list.files("data/filtered/states/DF", pattern = "\\.csv$", full.names = TRUE)
+states_df <- rbindlist(lapply(df_files, function(f) {
+  dt <- fread(f, colClasses = "character")
+  data.table(
+    politician_name = clean_name(dt$NOME_PARLAMENTAR),
+    politician_cpf  = clean_cpf(dt$CPF_PARLAMENTAR),
+    supplier_cnpj   = clean_cnpj(dt$CNPJ_PRESTADOR),
+    supplier_name   = dt$NOME_PRESTADOR,
+    valor           = as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", dt$VALOR_DESPESA))),
+    date            = dt$DATA_COMPROVANTE,
+    state_source    = "DF"
+  )
+}), fill = TRUE)
+
+# MG
+mg_file <- "data/filtered/states/MG/mg_combustivel.csv"
+if (file.exists(mg_file)) {
+  dt <- fread(mg_file, colClasses = "character")
+  states_mg <- data.table(
+    politician_name = clean_name(dt$NomeDeputado),
+    politician_cpf  = NA_character_,
+    supplier_cnpj   = clean_cnpj(dt$CpfCnpj),
+    supplier_name   = dt$Emitente,
+    valor           = as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", dt$ValorReembolso))),
+    date            = dt$Emissao,
+    state_source    = "MG"
+  )
+} else {
+  states_mg <- data.table()
+}
+
+# SP
+sp_files <- list.files("data/filtered/states/SP", pattern = "\\.csv$", full.names = TRUE)
+states_sp <- rbindlist(lapply(sp_files, function(f) {
+  dt <- fread(f, colClasses = "character")
+  data.table(
+    politician_name = clean_name(dt$Deputado),
+    politician_cpf  = NA_character_,
+    supplier_cnpj   = clean_cnpj(dt$CNPJ),
+    supplier_name   = dt$Fornecedor,
+    valor           = as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", dt$Valor))),
+    date            = NA_character_,
+    state_source    = "SP"
+  )
+}), fill = TRUE)
+
+# SC
+sc_files <- list.files("data/filtered/states/SC", pattern = "\\.csv$", full.names = TRUE)
+states_sc <- rbindlist(lapply(sc_files, function(f) {
+  dt <- fread(f, colClasses = "character")
+  # SC has Conta (deputy name) and Favorecido (supplier name), no CNPJ
+  data.table(
+    politician_name = clean_name(dt$Conta),
+    politician_cpf  = NA_character_,
+    supplier_cnpj   = NA_character_,
+    supplier_name   = dt$Favorecido,
+    valor           = as.numeric(gsub(",", ".", gsub("[^0-9,.-]", "", dt$Valor))),
+    date            = as.character(dt$Vencimento),
+    state_source    = "SC"
+  )
+}), fill = TRUE)
+
+states_all <- rbindlist(list(states_df, states_mg, states_sp, states_sc), fill = TRUE)
+cat("  ", nrow(states_all), "state records (DF:", nrow(states_df),
+    "MG:", nrow(states_mg), "SP:", nrow(states_sp), "SC:", nrow(states_sc), ")\n")
+
+# --- 1g. ANP Stations ---
+cat("Loading ANP stations...\n")
+anp_stations <- fread("data/filtered/anp/anp_stations.csv")
+anp_stations[, cnpj := clean_cnpj(cnpj_revenda)]
+cat("  ", nrow(anp_stations), "ANP station records\n")
+
+# --- 1h. QSA (firm ownership) ---
+cat("Loading QSA (socios.rds)...\n")
+socios <- readRDS("data/raw/socios.rds")
+# Filter to gas stations (CNAE 4731-8/00 = retail fuel)
+gas_socios <- socios[cnae_fiscal == 4731800]
+gas_socios[, cnpj_clean := clean_cnpj(as.character(bit64::as.integer64(cnpj)))]
+gas_socios[, socio_name := clean_name(nome_socio)]
+cat("  ", nrow(gas_socios), "gas station ownership records,",
+    uniqueN(gas_socios$cnpj_clean, na.rm = TRUE), "unique stations\n")
+
+# Keep individual socios (PF) for second-degree ownership analysis
+# Only retain columns needed: cnpj, cpf_cnpj_socio, nome_socio, cnae_fiscal, codigo_tipo_socio
+socios_pf_all <- socios[codigo_tipo_socio == 2,
+                        .(cnpj, cpf_cnpj_socio, nome_socio, cnae_fiscal)]
+rm(socios)  # free memory
+gc()
+
+cat("\n")
+
+# ============================================================
+# 2. Build politician master table
+# ============================================================
+cat("=== Building politician master table ===\n")
+
+# Primary source: candidatos registry (has CPF, name, party, office)
+pol_from_cand <- candidatos[!is.na(cpf), .(
+  nome = NM_CANDIDATO[1],
+  nome_urna = NM_URNA_CANDIDATO[1],
+  partidos = paste(unique(na.omit(SG_PARTIDO)), collapse = ";"),
+  cargos = paste(unique(na.omit(DS_CARGO)), collapse = ";"),
+  anos_eleicao = paste(sort(unique(na.omit(as.integer(ANO_ELEICAO)))), collapse = ";"),
+  eleito = any(grepl("ELEITO|MEDIA", DS_SIT_TOT_TURNO, ignore.case = TRUE))
+), by = .(cpf)]
+
+# Add CEAP deputies not in candidatos
+ceap_pols <- ceap[!is.na(politician_cpf), .(
+  nome = txNomeParlamentar[1],
+  sgPartido = sgPartido[1],
+  sgUF = sgUF[1]
+), by = .(cpf = politician_cpf)]
+# Keep only those not already in candidatos
+ceap_new <- ceap_pols[!cpf %in% pol_from_cand$cpf]
+if (nrow(ceap_new) > 0) {
+  ceap_new[, `:=`(nome_urna = NA_character_,
+                  partidos = sgPartido,
+                  cargos = "Deputado Federal",
+                  anos_eleicao = NA_character_,
+                  eleito = TRUE)]
+  ceap_new[, c("sgPartido", "sgUF") := NULL]
+}
+
+# Add DF state deputies with CPF
+df_pols <- states_all[state_source == "DF" & !is.na(politician_cpf), .(
+  nome = politician_name[1]
+), by = .(cpf = politician_cpf)]
+df_new <- df_pols[!cpf %in% c(pol_from_cand$cpf, ceap_new$cpf)]
+if (nrow(df_new) > 0) {
+  df_new[, `:=`(nome_urna = NA_character_,
+                partidos = NA_character_,
+                cargos = "Deputado Distrital",
+                anos_eleicao = NA_character_,
+                eleito = TRUE)]
+}
+
+politicians <- rbindlist(list(pol_from_cand, ceap_new, df_new), fill = TRUE)
+politicians[, nome_clean := clean_name(nome)]
+
+cat("  ", nrow(politicians), "unique politicians with CPF\n")
+
+# For CEAPS senators without CPF, try to match by name to candidatos
+ceaps_names <- unique(ceaps[!is.na(politician_name), .(politician_name)])
+ceaps_matched <- merge(ceaps_names, politicians[, .(cpf, nome_clean)],
+                       by.x = "politician_name", by.y = "nome_clean",
+                       all.x = TRUE)
+cat("   CEAPS senators matched by name:", sum(!is.na(ceaps_matched$cpf)),
+    "/", nrow(ceaps_matched), "\n")
+
+# Create a name-to-CPF lookup for senators not matched
+# Add unmatched CEAPS senators as politicians without CPF
+ceaps_unmatched <- ceaps_matched[is.na(cpf)]$politician_name
+if (length(ceaps_unmatched) > 0) {
+  ceaps_add <- data.table(
+    cpf = paste0("CEAPS_", seq_along(ceaps_unmatched)),  # synthetic ID
+    nome = ceaps_unmatched,
+    nome_urna = NA_character_,
+    partidos = NA_character_,
+    cargos = "Senador",
+    anos_eleicao = NA_character_,
+    eleito = TRUE,
+    nome_clean = ceaps_unmatched
+  )
+  politicians <- rbindlist(list(politicians, ceaps_add), fill = TRUE)
+  cat("   Added", nrow(ceaps_add), "CEAPS senators without CPF match\n")
+}
+
+# Similarly for MG/SP/SC state deputies without CPF
+for (src in c("MG", "SP", "SC")) {
+  st_names <- unique(states_all[state_source == src & is.na(politician_cpf) &
+                                 !is.na(politician_name), .(politician_name)])
+  st_matched <- merge(st_names, politicians[, .(cpf, nome_clean)],
+                      by.x = "politician_name", by.y = "nome_clean", all.x = TRUE)
+  st_unmatched <- st_matched[is.na(cpf)]$politician_name
+  if (length(st_unmatched) > 0) {
+    st_add <- data.table(
+      cpf = paste0(src, "_", seq_along(st_unmatched)),
+      nome = st_unmatched,
+      nome_urna = NA_character_,
+      partidos = NA_character_,
+      cargos = paste0("Deputado Estadual (", src, ")"),
+      anos_eleicao = NA_character_,
+      eleito = TRUE,
+      nome_clean = st_unmatched
+    )
+    politicians <- rbindlist(list(politicians, st_add), fill = TRUE)
+    cat("   Added", nrow(st_add), "unmatched", src, "state deputies\n")
+  }
+}
+
+cat("   Total politicians:", nrow(politicians), "\n\n")
+
+# ============================================================
+# 3. Build gas station master table
+# ============================================================
+cat("=== Building gas station master table ===\n")
+
+# Collect all unique CNPJs from every dataset
+all_cnpjs <- unique(na.omit(c(
+  ceap$supplier_cnpj,
+  ceaps$supplier_cnpj,
+  tse_exp$supplier_cnpj,
+  tse_rec$donor_cnpj,
+  states_all$supplier_cnpj,
+  anp_stations$cnpj,
+  gas_socios$cnpj_clean
+)))
+cat("  Total unique fuel-related CNPJs across all sources:", length(all_cnpjs), "\n")
+
+# Start with ANP station registry (has name, location, brand)
+stations <- anp_stations[!is.na(cnpj), .(
+  nome_fantasia = Revenda[1],
+  municipio = Municipio[1],
+  uf = uf[1],
+  bandeira = Bandeira[1]
+), by = .(cnpj)]
+
+# Add CNPJs from QSA that aren't in ANP
+qsa_stations <- gas_socios[!is.na(cnpj_clean), .(
+  razao_social = razao_social[1]
+), by = .(cnpj = cnpj_clean)]
+qsa_new <- qsa_stations[!cnpj %in% stations$cnpj]
+if (nrow(qsa_new) > 0) {
+  qsa_new[, `:=`(nome_fantasia = razao_social,
+                 municipio = NA_character_,
+                 uf = NA_character_,
+                 bandeira = NA_character_)]
+  qsa_new[, razao_social := NULL]
+  stations <- rbindlist(list(stations, qsa_new), fill = TRUE)
+}
+
+# Add CNPJs from TSE expenditures that aren't in either ANP or QSA
+tse_suppliers <- tse_exp[!is.na(supplier_cnpj), .(
+  nome = NM_FORNECEDOR[1],
+  municipio = NM_MUNICIPIO_FORNECEDOR[1],
+  uf = SG_UF_FORNECEDOR[1]
+), by = .(cnpj = supplier_cnpj)]
+tse_new <- tse_suppliers[!cnpj %in% stations$cnpj]
+if (nrow(tse_new) > 0) {
+  tse_new[, `:=`(nome_fantasia = nome, bandeira = NA_character_)]
+  tse_new[, nome := NULL]
+  stations <- rbindlist(list(stations, tse_new), fill = TRUE)
+}
+
+# Add remaining CNPJs from CEAP/CEAPS/states
+other_cnpjs <- data.table(cnpj = setdiff(all_cnpjs, stations$cnpj))
+if (nrow(other_cnpjs) > 0) {
+  # Try to get names from CEAP
+  ceap_names <- ceap[!is.na(supplier_cnpj), .(
+    nome = txtFornecedor[1]
+  ), by = .(cnpj = supplier_cnpj)]
+  other_cnpjs <- merge(other_cnpjs, ceap_names, by = "cnpj", all.x = TRUE)
+
+  # Try CEAPS names for those still missing
+  ceaps_names_dt <- ceaps[!is.na(supplier_cnpj), .(
+    nome2 = FORNECEDOR[1]
+  ), by = .(cnpj = supplier_cnpj)]
+  other_cnpjs <- merge(other_cnpjs, ceaps_names_dt, by = "cnpj", all.x = TRUE)
+  other_cnpjs[is.na(nome), nome := nome2]
+  other_cnpjs[, nome2 := NULL]
+
+  other_cnpjs[, `:=`(nome_fantasia = nome,
+                     municipio = NA_character_,
+                     uf = NA_character_,
+                     bandeira = NA_character_)]
+  other_cnpjs[, nome := NULL]
+  stations <- rbindlist(list(stations, other_cnpjs), fill = TRUE)
+}
+
+# Enrich stations with ownership data from QSA
+# Count number of partners and flag those with politician connections (built later)
+ownership <- gas_socios[!is.na(cnpj_clean) & !is.na(socio_name), .(
+  n_socios = .N,
+  socios = paste(unique(nome_socio), collapse = "; "),
+  socios_clean = paste(unique(socio_name), collapse = "; ")
+), by = .(cnpj = cnpj_clean)]
+
+stations <- merge(stations, ownership, by = "cnpj", all.x = TRUE)
+stations[is.na(n_socios), n_socios := 0L]
+
+cat("  Total stations:", nrow(stations), "\n")
+cat("    With ANP data:", sum(!is.na(stations$bandeira)), "\n")
+cat("    With ownership data:", sum(stations$n_socios > 0), "\n\n")
+
+# ============================================================
+# 4. Build connections (edges)
+# ============================================================
+cat("=== Building connection edges ===\n")
+
+# --- 4a. CEAP spending ---
+cat("  Processing CEAP connections...\n")
+conn_ceap <- ceap[!is.na(supplier_cnpj), .(
+  politician_cpf = politician_cpf,
+  politician_name = politician_name,
+  station_cnpj = supplier_cnpj,
+  type = "ceap_spending",
+  year = as.integer(numAno),
+  valor = vlrLiquido,
+  source = "ceap"
+)]
+# Resolve CPF for name-only entries using politician lookup
+conn_ceap[is.na(politician_cpf) & !is.na(politician_name),
+          politician_cpf := politicians$cpf[match(politician_name, politicians$nome_clean)]]
+
+# --- 4b. CEAPS spending ---
+cat("  Processing CEAPS connections...\n")
+# Build name-to-CPF lookup for CEAPS
+ceaps_cpf_lookup <- rbind(
+  ceaps_matched[!is.na(cpf), .(politician_name, cpf)],
+  data.table(politician_name = ceaps_unmatched,
+             cpf = paste0("CEAPS_", seq_along(ceaps_unmatched)))
+)
+conn_ceaps <- ceaps[!is.na(supplier_cnpj), .(
+  politician_name = politician_name,
+  station_cnpj = supplier_cnpj,
+  type = "ceaps_spending",
+  year = as.integer(ANO),
+  valor = valor,
+  source = "ceaps"
+)]
+conn_ceaps[, politician_cpf := ceaps_cpf_lookup$cpf[match(politician_name, ceaps_cpf_lookup$politician_name)]]
+
+# --- 4c. TSE campaign expenditures ---
+cat("  Processing TSE expenditure connections...\n")
+conn_tse_exp <- tse_exp[!is.na(supplier_cnpj) & !is.na(politician_cpf), .(
+  politician_cpf = politician_cpf,
+  politician_name = clean_name(NM_CANDIDATO),
+  station_cnpj = supplier_cnpj,
+  type = "campaign_spending",
+  year = as.integer(AA_ELEICAO),
+  valor = valor,
+  source = "tse_expenditure"
+)]
+
+# --- 4d. TSE campaign donations ---
+cat("  Processing TSE receipt connections...\n")
+conn_tse_rec <- tse_rec[!is.na(donor_cnpj) & !is.na(politician_cpf), .(
+  politician_cpf = politician_cpf,
+  politician_name = clean_name(NM_CANDIDATO),
+  station_cnpj = donor_cnpj,
+  type = "campaign_donation",
+  year = as.integer(AA_ELEICAO),
+  valor = valor,
+  source = "tse_receipt"
+)]
+
+# --- 4e. State spending ---
+cat("  Processing state connections...\n")
+conn_states <- states_all[!is.na(supplier_cnpj), .(
+  politician_cpf = politician_cpf,
+  politician_name = politician_name,
+  station_cnpj = supplier_cnpj,
+  type = "state_spending",
+  year = extract_year(date),
+  valor = valor,
+  source = paste0("state_", state_source)
+)]
+# Resolve CPF where missing via politician lookup
+conn_states[is.na(politician_cpf) & !is.na(politician_name),
+            politician_cpf := politicians$cpf[match(politician_name, politicians$nome_clean)]]
+
+# --- 4f. Ownership connections (CPF-based matching) ---
+cat("  Processing ownership connections...\n")
+
+# Match using partial CPF: QSA masks CPFs as ***XXXXXX** (middle 6 visible)
+# Politicians have full 11-digit CPFs; extract middle 6 = chars 4-9
+# Match on BOTH middle-6 AND cleaned name for high confidence
+
+# Prepare QSA gas station partners with middle-6 CPF
+gas_pf <- gas_socios[codigo_tipo_socio == 2 & !is.na(cnpj_clean)]  # Pessoa Fisica only
+gas_pf[, middle6 := gsub("[*]", "", cpf_cnpj_socio)]
+gas_pf <- gas_pf[nchar(middle6) == 6]  # valid masked CPFs only
+
+# Prepare politicians with middle-6
+pol_cpf <- politicians[!is.na(cpf) & nchar(cpf) == 11, .(cpf, nome_clean)]
+pol_cpf[, middle6 := substr(cpf, 4, 9)]
+
+# Direct ownership: politician IS a gas station partner (middle6 + name match)
+owner_pol <- merge(gas_pf[, .(cnpj_clean, socio_name, middle6, year_start)],
+                   pol_cpf,
+                   by.x = c("middle6", "socio_name"),
+                   by.y = c("middle6", "nome_clean"),
+                   allow.cartesian = TRUE)
+
+if (nrow(owner_pol) > 0) {
+  conn_ownership <- owner_pol[, .(
+    politician_cpf = cpf,
+    politician_name = socio_name,
+    station_cnpj = cnpj_clean,
+    type = "ownership",
+    year = as.integer(year_start),
+    valor = NA_real_,
+    source = "qsa"
+  )]
+  cat("    Direct ownership (CPF+name match):", nrow(conn_ownership), "\n")
+} else {
+  conn_ownership <- data.table(
+    politician_cpf = character(), politician_name = character(),
+    station_cnpj = character(), type = character(),
+    year = integer(), valor = numeric(), source = character()
+  )
+  cat("    No direct ownership connections found\n")
+}
+
+# --- 4g. Second-degree ownership (politician → shared firm → co-partner → gas station) ---
+# Free large objects no longer needed before heavy memory operation
+rm(gas_socios)
+gc()
+cat("  Processing second-degree ownership connections...\n")
+
+# Use pre-saved socios_pf_all (individual partners) from initial load
+socios_pf <- copy(socios_pf_all)
+socios_pf[, middle6 := gsub("[*]", "", cpf_cnpj_socio)]
+socios_pf[, cname := clean_name(nome_socio)]
+socios_pf[, cnpj_clean := clean_cnpj(as.character(bit64::as.integer64(cnpj)))]
+socios_pf <- socios_pf[nchar(middle6) == 6 & !is.na(cname) & !is.na(cnpj_clean)]
+# Free the pre-saved copy
+rm(socios_pf_all)
+gc()
+
+# Step 1: Find politicians in non-gas firms
+non_gas <- socios_pf[cnae_fiscal != 4731800]
+pol_in_firms <- merge(non_gas[, .(cnpj_shared = cnpj_clean, middle6, cname)],
+                      pol_cpf[, .(cpf, middle6, nome_clean)],
+                      by.x = c("middle6", "cname"),
+                      by.y = c("middle6", "nome_clean"),
+                      allow.cartesian = TRUE)
+cat("    Politicians in non-gas firms:", uniqueN(pol_in_firms$cpf), "\n")
+cat("    Shared firms:", uniqueN(pol_in_firms$cnpj_shared), "\n")
+
+# Step 2: Get co-partners at those shared firms (exclude the politician themselves)
+shared_firm_cnpjs <- unique(pol_in_firms$cnpj_shared)
+co_partners <- non_gas[cnpj_clean %in% shared_firm_cnpjs]
+# Exclude politicians themselves (by middle6 + name)
+pol_keys <- unique(pol_in_firms[, .(middle6, cname)])
+co_partners <- co_partners[!pol_keys, on = c("middle6", "cname")]
+
+# Step 3: Match co-partners to gas station owners (middle6 + name)
+gas_owners <- socios_pf[cnae_fiscal == 4731800,
+                         .(cnpj_gas = cnpj_clean, middle6, cname)]
+gas_owners <- unique(gas_owners)
+
+second_deg <- merge(co_partners[, .(cnpj_shared = cnpj_clean, middle6, cname)],
+                    gas_owners,
+                    by = c("middle6", "cname"),
+                    allow.cartesian = TRUE)
+
+# Step 4: Link back to politicians through shared firm
+second_full <- merge(second_deg[, .(cnpj_shared, cnpj_gas, intermediary_mid6 = middle6,
+                                     intermediary_name = cname)],
+                     pol_in_firms[, .(cpf, cnpj_shared)],
+                     by = "cnpj_shared",
+                     allow.cartesian = TRUE)
+
+# Deduplicate: unique politician-station pairs
+second_full <- unique(second_full, by = c("cpf", "cnpj_gas"))
+
+cat("    Second-degree edges:", nrow(second_full), "\n")
+cat("    Unique politicians:", uniqueN(second_full$cpf), "\n")
+cat("    Unique gas stations:", uniqueN(second_full$cnpj_gas), "\n")
+cat("    Unique intermediaries:", uniqueN(second_full[, paste(intermediary_mid6, intermediary_name)]), "\n")
+
+# Save detailed second-degree connections
+fwrite(second_full, file.path(OUT_DIR, "second_degree_details.csv"))
+
+# Build connection edges
+if (nrow(second_full) > 0) {
+  conn_second_deg <- second_full[, .(
+    politician_cpf = cpf,
+    politician_name = NA_character_,
+    station_cnpj = cnpj_gas,
+    type = "second_degree_ownership",
+    year = NA_integer_,
+    valor = NA_real_,
+    source = "qsa_second_degree"
+  )]
+} else {
+  conn_second_deg <- data.table(
+    politician_cpf = character(), politician_name = character(),
+    station_cnpj = character(), type = character(),
+    year = integer(), valor = numeric(), source = character()
+  )
+}
+
+rm(socios_full, socios_pf, non_gas, co_partners, gas_owners, second_deg)
+gc()
+
+# Combine all connections
+connections <- rbindlist(list(
+  conn_ceap, conn_ceaps, conn_tse_exp, conn_tse_rec,
+  conn_states, conn_ownership, conn_second_deg
+), fill = TRUE)
+
+cat("\n  Total connections:", nrow(connections), "\n")
+cat("  By type:\n")
+print(connections[, .(records = .N, total_valor = sum(valor, na.rm = TRUE)), by = type])
+
+# ============================================================
+# 5. Flag suspicious connections
+# ============================================================
+cat("\n=== Flagging suspicious connections ===\n")
+
+# Flag 1: Politician owns a gas station AND spends money there
+spending_types <- c("ceap_spending", "ceaps_spending", "campaign_spending", "state_spending")
+ownership_pairs <- connections[type == "ownership", .(politician_cpf, station_cnpj)]
+spending_pairs <- connections[type %in% spending_types, .(politician_cpf, station_cnpj)]
+
+self_dealing <- fintersect(
+  unique(ownership_pairs),
+  unique(spending_pairs)
+)
+cat("  Self-dealing (owns station + spends there):", nrow(self_dealing), "\n")
+
+# Flag 1b: Politician spends at a station owned by their business associate (second-degree)
+second_deg_pairs <- connections[type == "second_degree_ownership", .(politician_cpf, station_cnpj)]
+second_deg_spending <- fintersect(
+  unique(second_deg_pairs),
+  unique(spending_pairs)
+)
+cat("  Second-degree dealing (co-partner owns station + politician spends there):",
+    nrow(second_deg_spending), "\n")
+
+# Flag 2: Politician receives donation from AND spends at same station
+donation_pairs <- connections[type == "campaign_donation", .(politician_cpf, station_cnpj)]
+round_trip <- fintersect(
+  unique(donation_pairs),
+  unique(spending_pairs)
+)
+cat("  Round-tripping (receives donation + spends there):", nrow(round_trip), "\n")
+
+# Flag 3: Politician spends at station owned by fellow party member
+# (requires cross-referencing party affiliations)
+# Add party info to ownership connections
+if (nrow(conn_ownership) > 0) {
+  owner_parties <- merge(
+    conn_ownership[, .(owner_cpf = politician_cpf, station_cnpj)],
+    politicians[, .(cpf, partidos)],
+    by.x = "owner_cpf", by.y = "cpf", all.x = TRUE
+  )
+  setnames(owner_parties, "partidos", "owner_party")
+
+  spender_parties <- merge(
+    connections[type %in% spending_types, .(spender_cpf = politician_cpf, station_cnpj)],
+    politicians[, .(cpf, partidos)],
+    by.x = "spender_cpf", by.y = "cpf", all.x = TRUE
+  )
+  setnames(spender_parties, "partidos", "spender_party")
+
+  # Find pairs where spender and owner share a party
+  party_conn <- merge(owner_parties, spender_parties, by = "station_cnpj",
+                      allow.cartesian = TRUE)
+  party_conn <- party_conn[owner_cpf != spender_cpf]  # exclude self-dealing
+
+  if (nrow(party_conn) > 0) {
+    # Check if any party overlaps
+    party_conn[, party_overlap := mapply(function(a, b) {
+      if (is.na(a) || is.na(b)) return(FALSE)
+      length(intersect(strsplit(a, ";")[[1]], strsplit(b, ";")[[1]])) > 0
+    }, owner_party, spender_party)]
+    same_party <- party_conn[party_overlap == TRUE]
+    cat("  Same-party patronage (spends at co-partisan's station):",
+        uniqueN(same_party[, .(spender_cpf, station_cnpj)]), "\n")
+  }
+}
+
+# ============================================================
+# 6. Save outputs
+# ============================================================
+cat("\n=== Saving outputs ===\n")
+
+# Check if arrow is available for parquet, fall back to CSV
+has_arrow <- requireNamespace("arrow", quietly = TRUE)
+
+if (has_arrow) {
+  arrow::write_parquet(politicians, file.path(OUT_DIR, "politicians.parquet"))
+  arrow::write_parquet(stations, file.path(OUT_DIR, "stations.parquet"))
+  arrow::write_parquet(connections, file.path(OUT_DIR, "connections.parquet"))
+  cat("  Saved as parquet\n")
+} else {
+  fwrite(politicians, file.path(OUT_DIR, "politicians.csv"))
+  fwrite(stations, file.path(OUT_DIR, "stations.csv"))
+  fwrite(connections, file.path(OUT_DIR, "connections.csv"))
+  cat("  Saved as CSV (install arrow package for parquet)\n")
+}
+
+# Save flag summaries
+if (nrow(self_dealing) > 0) {
+  fwrite(self_dealing, file.path(OUT_DIR, "flag_self_dealing.csv"))
+}
+if (nrow(second_deg_spending) > 0) {
+  fwrite(second_deg_spending, file.path(OUT_DIR, "flag_second_degree_dealing.csv"))
+}
+if (nrow(round_trip) > 0) {
+  fwrite(round_trip, file.path(OUT_DIR, "flag_round_trip.csv"))
+}
+
+cat("\n=== Summary ===\n")
+cat("  Politicians:", nrow(politicians), "\n")
+cat("  Gas stations:", nrow(stations), "\n")
+cat("  Connections:", nrow(connections), "\n")
+cat("  Self-dealing flags:", nrow(self_dealing), "\n")
+cat("  Second-degree dealing flags:", nrow(second_deg_spending), "\n")
+cat("  Round-trip flags:", nrow(round_trip), "\n")
+cat("\nDone. Files in:", OUT_DIR, "\n")

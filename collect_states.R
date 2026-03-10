@@ -2,6 +2,8 @@
 # Download and filter state deputies' spending on fuel from Assembleias Legislativas
 # Covers all 27 Brazilian federative units, tiered by data accessibility
 
+library(data.table)
+
 RAW_DIR <- "data/raw/states"
 FILTERED_DIR <- "data/filtered/states"
 
@@ -9,7 +11,7 @@ dir.create(RAW_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(FILTERED_DIR, recursive = TRUE, showWarnings = FALSE)
 
 FUEL_PATTERN <- paste0(
-  "combust|gasolina|petroleo|petróleo|posto|etanol|diesel|",
+  "combust|gasolina|petr.leo|posto|etanol|diesel|",
   "lubrificante|abastecimento"
 )
 
@@ -24,52 +26,74 @@ safe_download <- function(url, dest) {
   })
 }
 
-# Helper: read CSV with multiple encoding/separator attempts
-safe_read_csv <- function(path, seps = c(";", ",", "|", "\t"),
-                          encodings = c("latin1", "UTF-8")) {
-  for (enc in encodings) {
-    for (sep in seps) {
-      result <- tryCatch({
-        df <- read.csv(path, sep = sep, fileEncoding = enc,
-                       stringsAsFactors = FALSE, quote = "\"")
-        if (ncol(df) > 1) return(df)
-        NULL
-      }, error = function(e) NULL)
-      if (!is.null(result)) return(result)
-    }
+# Helper: detect file encoding using raw bytes
+detect_encoding <- function(path) {
+  raw <- readBin(path, "raw", n = min(file.size(path), 10000))
+  # Check for UTF-8 BOM
+  if (length(raw) >= 3 && raw[1] == as.raw(0xef) &&
+      raw[2] == as.raw(0xbb) && raw[3] == as.raw(0xbf)) return("UTF-8")
+  # Check if content is valid UTF-8: look for multi-byte sequences
+  has_high <- any(raw > as.raw(0x7f))
+  if (!has_high) return("UTF-8")  # pure ASCII, either works
+  # Try to convert as UTF-8; if iconv fails (returns NA), it's likely Latin-1
+  text <- rawToChar(raw)
+  converted <- iconv(text, from = "UTF-8", to = "UTF-8")
+  if (!is.na(converted)) return("UTF-8")
+  "Latin-1"
+}
+
+# Helper: read CSV with encoding detection
+safe_read_csv <- function(path, seps = c(";", ",", "|", "\t")) {
+  enc <- detect_encoding(path)
+  for (sep in seps) {
+    result <- tryCatch({
+      dt <- fread(path, sep = sep, encoding = enc)
+      if (ncol(dt) > 1) {
+        if (enc == "Latin-1") {
+          setnames(dt, iconv(names(dt), from = "latin1", to = "UTF-8"))
+          chr_cols <- names(dt)[vapply(dt, is.character, logical(1))]
+          for (col in chr_cols) {
+            set(dt, j = col, value = iconv(dt[[col]], from = "latin1", to = "UTF-8"))
+          }
+        }
+        return(dt)
+      }
+      NULL
+    }, error = function(e) NULL)
+    if (!is.null(result)) return(result)
   }
   NULL
 }
 
-# Helper: filter a dataframe for fuel-related rows
-filter_fuel <- function(df) {
+# Helper: filter a data.table for fuel-related rows
+filter_fuel <- function(dt) {
   # First try to find an expense type/category column
   type_col <- grep("tipo.*despesa|descricao.*despesa|categoria|natureza|rubrica|subelem",
-                   names(df), ignore.case = TRUE, value = TRUE)
+                   names(dt), ignore.case = TRUE, value = TRUE)
 
   if (length(type_col) > 0) {
-    mask <- grepl(FUEL_PATTERN, df[[type_col[1]]], ignore.case = TRUE)
-    if (sum(mask) > 0) return(df[mask, ])
+    mask <- grepl(FUEL_PATTERN, dt[[type_col[1]]], ignore.case = TRUE)
+    if (sum(mask) > 0) return(dt[mask])
   }
 
   # Fall back: search all text columns for fuel keywords
-  text_cols <- names(df)[sapply(df, is.character)]
-  mask <- rep(FALSE, nrow(df))
+  text_cols <- names(dt)[sapply(dt, is.character)]
+  mask <- rep(FALSE, nrow(dt))
   for (col in text_cols) {
-    mask <- mask | grepl(FUEL_PATTERN, df[[col]], ignore.case = TRUE)
+    mask <- mask | grepl(FUEL_PATTERN, dt[[col]], ignore.case = TRUE)
   }
-  df[mask, ]
+  dt[mask]
 }
 
 # Helper: process and save filtered data for a state
-save_state <- function(df, uf, label = "") {
-  fuel <- filter_fuel(df)
+save_state <- function(dt, uf, label = "") {
+  fuel <- filter_fuel(dt)
   state_dir <- file.path(FILTERED_DIR, uf)
   dir.create(state_dir, recursive = TRUE, showWarnings = FALSE)
 
   suffix <- if (nchar(label) > 0) paste0("_", label) else ""
   out_file <- file.path(state_dir, paste0(tolower(uf), "_combustivel", suffix, ".csv"))
-  write.csv(fuel, out_file, row.names = FALSE, fileEncoding = "UTF-8")
+  fwrite(fuel, out_file)
   cat("    ", uf, label, ":", nrow(fuel), "fuel records\n")
   nrow(fuel)
 }
@@ -98,19 +122,31 @@ for (year in 2019:2025) {
 cat("\nSP (ALESP)...\n")
 sp_dir <- file.path(RAW_DIR, "SP")
 dir.create(sp_dir, recursive = TRUE, showWarnings = FALSE)
-# ALESP publishes data at their open data portal
-# Files are ZIP archives with pipe-separated .txt files
+# ALESP now publishes XML files (migrated from ZIP/CSV)
 for (year in 2010:2025) {
   url <- paste0("https://www.al.sp.gov.br/repositorioDados/deputados/despesas_gabinetes_",
-                year, ".zip")
-  dest <- file.path(sp_dir, paste0("sp_despesas_", year, ".zip"))
+                year, ".xml")
+  dest <- file.path(sp_dir, paste0("sp_despesas_", year, ".xml"))
   cat("  Downloading", year, "...\n")
   if (safe_download(url, dest)) {
-    csv_files <- tryCatch(unzip(dest, exdir = sp_dir), error = function(e) character(0))
-    for (f in csv_files) {
-      df <- safe_read_csv(f)
-      if (!is.null(df)) save_state(df, "SP", as.character(year))
-    }
+    tryCatch({
+      xml_data <- xml2::read_xml(dest)
+      records <- xml2::xml_find_all(xml_data, ".//despesa")
+      if (length(records) > 0) {
+        dt <- data.table(
+          Ano = xml2::xml_text(xml2::xml_find_first(records, ".//Ano")),
+          Mes = xml2::xml_text(xml2::xml_find_first(records, ".//Mes")),
+          Deputado = xml2::xml_text(xml2::xml_find_first(records, ".//Deputado")),
+          Tipo = xml2::xml_text(xml2::xml_find_first(records, ".//Tipo")),
+          Fornecedor = xml2::xml_text(xml2::xml_find_first(records, ".//Fornecedor")),
+          CNPJ = xml2::xml_text(xml2::xml_find_first(records, ".//CNPJ")),
+          Valor = xml2::xml_text(xml2::xml_find_first(records, ".//Valor"))
+        )
+        save_state(dt, "SP", as.character(year))
+      }
+    }, error = function(e) {
+      cat("    Failed to parse XML:", conditionMessage(e), "\n")
+    })
   }
 }
 
@@ -118,37 +154,13 @@ for (year in 2010:2025) {
 cat("\nMG (ALMG)...\n")
 mg_dir <- file.path(RAW_DIR, "MG")
 dir.create(mg_dir, recursive = TRUE, showWarnings = FALSE)
-# ALMG has an API at dadosabertos.almg.gov.br
-# Verbas indenizatórias endpoint
-for (year in 2019:2025) {
-  for (month in 1:12) {
-    url <- paste0("https://dadosabertos.almg.gov.br/ws/prestacao_contas/",
-                  "verbas_indenizatorias/deputados/", year, "/", month, "?formato=json")
-    dest <- file.path(mg_dir, paste0("mg_verbas_", year, "_", sprintf("%02d", month), ".json"))
-    if (safe_download(url, dest)) {
-      tryCatch({
-        json_text <- readLines(dest, warn = FALSE, encoding = "UTF-8")
-        json_data <- jsonlite::fromJSON(paste(json_text, collapse = ""))
-        if (is.data.frame(json_data) || is.list(json_data)) {
-          # Flatten if needed
-          if (!is.data.frame(json_data)) {
-            # Look for the data frame inside the JSON structure
-            for (name in names(json_data)) {
-              if (is.data.frame(json_data[[name]])) {
-                json_data <- json_data[[name]]
-                break
-              }
-            }
-          }
-          if (is.data.frame(json_data) && nrow(json_data) > 0) {
-            save_state(json_data, "MG", paste0(year, "_", sprintf("%02d", month)))
-          }
-        }
-      }, error = function(e) {
-        cat("    Failed to parse JSON for MG", year, month, "\n")
-      })
-    }
-  }
+# ALMG bulk CSV download (old /ws/ API was deprecated June 2025)
+url <- "https://dadosabertos.almg.gov.br/arquivo/verbas-indenizatorias/download"
+dest <- file.path(mg_dir, "mg_verbas_bulk.csv")
+cat("  Downloading bulk CSV...\n")
+if (safe_download(url, dest)) {
+  df <- safe_read_csv(dest)
+  if (!is.null(df)) save_state(df, "MG")
 }
 
 # --- DF (Distrito Federal - CLDF) ---
@@ -182,7 +194,7 @@ pe_dir <- file.path(RAW_DIR, "PE")
 dir.create(pe_dir, recursive = TRUE, showWarnings = FALSE)
 # ALEPE open data API: dadosabertos.alepe.pe.gov.br
 for (year in 2019:2025) {
-  url <- paste0("https://dadosabertos.alepe.pe.gov.br/api/verbas_indenizatorias/",
+  url <- paste0("https://dadosabertos.alepe.pe.gov.br/api/v1/verbas_indenizatorias/",
                 year, "?formato=csv")
   dest <- file.path(pe_dir, paste0("pe_verbas_", year, ".csv"))
   cat("  Downloading", year, "...\n")
@@ -204,21 +216,6 @@ for (year in 2019:2025) {
   if (safe_download(url, dest)) {
     df <- safe_read_csv(dest)
     if (!is.null(df)) save_state(df, "CE", as.character(year))
-  }
-}
-
-# --- RS (Rio Grande do Sul - ALERS) ---
-cat("\nRS (ALERS)...\n")
-rs_dir <- file.path(RAW_DIR, "RS")
-dir.create(rs_dir, recursive = TRUE, showWarnings = FALSE)
-for (year in 2019:2025) {
-  url <- paste0("http://www2.al.rs.gov.br/transparenciaalrs/DadosAbertos/",
-                "Despesas_", year, ".csv")
-  dest <- file.path(rs_dir, paste0("rs_despesas_", year, ".csv"))
-  cat("  Downloading", year, "...\n")
-  if (safe_download(url, dest)) {
-    df <- safe_read_csv(dest)
-    if (!is.null(df)) save_state(df, "RS", as.character(year))
   }
 }
 
@@ -365,6 +362,7 @@ tier3_states <- list(
   PB = "https://www.al.pb.leg.br/transparencia",
   RJ = "https://transparencia.alerj.rj.gov.br",
   RR = "https://transparencia.al.rr.leg.br",
+  RS = "https://transparencia.al.rs.gov.br/parlamentares/gastos",
   SE = "https://al.se.leg.br/portal-da-transparencia/",
   TO = "https://www.al.to.leg.br/transparencia"
 )
